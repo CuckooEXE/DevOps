@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from devops.core.command import Command
 from devops.core.target import Artifact, Target
-from devops.targets.c_cpp import CCompile, ElfBinary, StaticLibrary, _resolve_sources
+from devops.targets.c_cpp import CCompile, ElfBinary, SourcesSpec, StaticLibrary, _resolve_sources
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -36,14 +36,15 @@ class GoogleTest(CCompile, TestTarget):
     def __init__(
         self,
         name: str,
-        srcs: str | list[str],
+        srcs: SourcesSpec,
         target: Target,
         extra_flags: tuple[str, ...] = (),
         extra_libs: tuple[str, ...] = ("gtest", "gtest_main", "pthread"),
         deps: dict[str, Target] | None = None,
         version: str | None = None,
-    ):
-        super().__init__(name=name, deps=deps, version=version)
+        doc: str | None = None,
+    ) -> None:
+        super().__init__(name=name, deps=deps, version=version, doc=doc)
         if not isinstance(target, CCompile):
             raise TypeError(
                 f"GoogleTest target= must be a CCompile artifact, got {type(target).__name__}"
@@ -57,13 +58,19 @@ class GoogleTest(CCompile, TestTarget):
         self.is_cxx = True
         self._pic = False
 
-        # Link against the thing being tested (if it's a library), plus gtest
+        # Linkable inputs:
+        #   - if target is a library, link against it directly
+        #   - otherwise (ElfBinary under test), link against everything the
+        #     binary itself links, so tests see the same library env
+        #   - plus gtest / gtest_main / pthread (extra_libs)
         linkable: list[str | Target] = []
-        if isinstance(target, (StaticLibrary,)) or type(target).__name__ == "ElfSharedObject":
+        if isinstance(target, StaticLibrary) or type(target).__name__ == "ElfSharedObject":
             linkable.append(target)
+        elif isinstance(target, ElfBinary):
+            linkable.extend(target.libs)
         linkable.extend(extra_libs)
         self.libs = tuple(linkable)
-        # Implicit dep so `devops test Foo` also builds the lib under test
+        # Implicit dep so `devops test Foo` also builds the thing being tested
         self.deps[f"_tested_{target.name}"] = target
 
     def output_path(self, ctx: "BuildContext") -> Path:
@@ -118,12 +125,13 @@ class Pytest(TestTarget):
     def __init__(
         self,
         name: str,
-        srcs: str | list[str],
+        srcs: SourcesSpec,
         target: "PythonWheel | None" = None,
         deps: dict[str, Target] | None = None,
         version: str | None = None,
-    ):
-        super().__init__(name=name, deps=deps, version=version)
+        doc: str | None = None,
+    ) -> None:
+        super().__init__(name=name, deps=deps, version=version, doc=doc)
         self.srcs = _resolve_sources(self.project.root, srcs)
         self._target = target
         if target is not None:
@@ -139,10 +147,17 @@ class Pytest(TestTarget):
         pytest = ctx.toolchain.pytest.resolved_for(
             workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
         )
+        # When testing against a PythonWheel, prepend its src dir to PYTHONPATH
+        # so `from <pkg> import ...` works without installing the wheel first.
+        env: tuple[tuple[str, str], ...] = ()
+        if self._target is not None:
+            pkg_dir = str(self._target.pyproject.parent)
+            env = (("PYTHONPATH", pkg_dir),)
         return [
             Command(
                 argv=pytest.invoke([str(s) for s in self.srcs]),
                 cwd=self.project.root,
+                env=env,
                 label=f"pytest {self.name}",
                 inputs=tuple(self.srcs),
             )

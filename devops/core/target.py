@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,11 +27,20 @@ class Project:
 
 
 class Target(ABC):
-    def __init__(self, name: str, deps: dict[str, "Target"] | None = None):
+    def __init__(
+        self,
+        name: str,
+        deps: dict[str, "Target"] | None = None,
+        doc: str | None = None,
+    ):
         if not name or not isinstance(name, str):
             raise ValueError(f"Target name must be a non-empty string, got {name!r}")
         self.name = name
         self.deps: dict[str, Target] = dict(deps) if deps else {}
+        # inspect.cleandoc strips the first line, then dedents the rest by
+        # their common leading whitespace — same rules as Python docstrings,
+        # so triple-quoted multi-line `doc="""..."""` renders cleanly.
+        self.doc: str = inspect.cleandoc(doc) if doc else ""
         self.project: Project = registry.current_project()
         registry.register(self)
 
@@ -54,8 +64,9 @@ class Artifact(Target):
         name: str,
         deps: dict[str, Target] | None = None,
         version: str | None = None,
+        doc: str | None = None,
     ):
-        super().__init__(name=name, deps=deps)
+        super().__init__(name=name, deps=deps, doc=doc)
         self._version_override = version
 
     @abstractmethod
@@ -94,8 +105,9 @@ class Script(Target):
         deps: dict[str, Target] | None = None,
         cmds: list[str] | None = None,
         script: str | Path | None = None,
+        doc: str | None = None,
     ):
-        super().__init__(name=name, deps=deps)
+        super().__init__(name=name, deps=deps, doc=doc)
         if (cmds is None) == (script is None):
             raise ValueError(
                 f"Script {name!r} must declare exactly one of cmds=... or script=..."
@@ -104,19 +116,21 @@ class Script(Target):
         self._script = Path(script) if script else None
 
     def describe(self) -> str:
-        if self._script:
+        if self._script is not None:
             return f"Script {self.name} runs {self._script}"
+        assert self._cmds is not None  # validated in __init__
         return f"Script {self.name} runs {len(self._cmds)} cmd(s)"
 
     def run_cmds(self, ctx: "BuildContext") -> list["Command"]:
         from devops.core.command import Command
 
-        if self._script:
+        if self._script is not None:
             path = self.project.root / self._script if not self._script.is_absolute() else self._script
             return [Command.argv_cmd(["bash", str(path)], cwd=self.project.root, label=f"run {self.name}")]
 
+        assert self._cmds is not None  # validated in __init__
         views = {k: _TargetView(v, ctx) for k, v in self.deps.items()}
-        rendered = []
+        rendered: list[Command] = []
         for line in self._cmds:
             rendered.append(
                 Command.shell_cmd(

@@ -31,7 +31,7 @@ def lint_for_ccompile(target: "CCompile", ctx: "BuildContext") -> list[Command]:
     from devops.targets.c_cpp import CCompile  # noqa: F401
 
     compile_flags = target._compile_flags(ctx)
-    project_root = target.project.root  # type: ignore[attr-defined]
+    project_root = target.project.root
     cmds: list[Command] = []
 
     # clang-format --dry-run --Werror (reads .clang-format if present)

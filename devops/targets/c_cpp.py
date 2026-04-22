@@ -12,19 +12,29 @@ Flag composition vs tool invocation is deliberately split:
 from __future__ import annotations
 
 import glob
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 from devops.core.command import Command
-from devops.core.target import Artifact, Target
+from devops.core.target import Artifact, Project, Target
 from devops.options import OptimizationLevel
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
 
 
-SourcesSpec = str | Path | list[str | Path] | tuple[str | Path, ...]
-LibSpec = str | Target  # a Target ref, "::name", "name" (system), "git+ssh://..." (v2)
+# `Sequence` is covariant, so `list[Path]` (what glob() returns) fits into
+# `Sequence[str | Path]`. `list[str | Path]` here would force callers to
+# build list[str | Path] explicitly — that's the VSCode noise the user hit.
+SourcesSpec = Union[str, Path, Sequence[Union[str, Path]]]
+LibSpec = Union[str, Target]  # a Target ref, "::name", "name" (system), "git+ssh://..." (v2)
+
+
+def _as_sequence(specs: SourcesSpec) -> Sequence[str | Path]:
+    if isinstance(specs, (str, Path)):
+        return [specs]
+    return specs
 
 
 def _resolve_sources(project_root: Path, specs: SourcesSpec | None) -> list[Path]:
@@ -35,11 +45,9 @@ def _resolve_sources(project_root: Path, specs: SourcesSpec | None) -> list[Path
     """
     if specs is None:
         return []
-    if isinstance(specs, (str, Path)):
-        specs = [specs]
     paths: list[Path] = []
     seen: set[Path] = set()
-    for s in specs:
+    for s in _as_sequence(specs):
         p = Path(s)
         if not p.is_absolute():
             p = (project_root / p).resolve()
@@ -62,27 +70,20 @@ def glob_sources(
     allow_empty: bool = False,
 ) -> list[Path]:
     """Bazel-style glob. Returns files matching any pattern, minus `exclude`."""
-    if isinstance(patterns, (str, Path)):
-        patterns = [patterns]
-    if exclude is None:
-        exclude = []
-    elif isinstance(exclude, (str, Path)):
-        exclude = [exclude]
-
     matched: set[Path] = set()
-    for pat in patterns:
+    for pat in _as_sequence(patterns):
         full = str((project_root / Path(pat)).resolve())
-        hits = glob.glob(full, recursive=True)
-        for h in hits:
+        for h in glob.glob(full, recursive=True):
             p = Path(h)
             if p.is_file():
                 matched.add(p)
 
     excluded: set[Path] = set()
-    for pat in exclude:
-        full = str((project_root / Path(pat)).resolve())
-        for h in glob.glob(full, recursive=True):
-            excluded.add(Path(h))
+    if exclude is not None:
+        for pat in _as_sequence(exclude):
+            full = str((project_root / Path(pat)).resolve())
+            for h in glob.glob(full, recursive=True):
+                excluded.add(Path(h))
 
     result = sorted(matched - excluded)
     if not result and not allow_empty:
@@ -93,9 +94,19 @@ def glob_sources(
 
 
 class CCompile:
-    """Mixin: shared flag computation for C-family artifacts."""
+    """Mixin: shared flag computation for C-family artifacts.
 
-    # Subclasses set these as instance attrs in __init__
+    Always combined with `Artifact` in concrete classes — the attribute
+    declarations below are shadowed in __init__ of the combined class; the
+    annotations here exist so static type checkers see them.
+    """
+
+    # From Target / Artifact (set by their __init__):
+    name: str
+    project: Project
+    deps: dict[str, Target]
+
+    # Set by the combined class's __init__:
     srcs: list[Path]
     includes: list[Path]
     flags: tuple[str, ...]
@@ -103,6 +114,7 @@ class CCompile:
     undefs: tuple[str, ...]
     libs: tuple[LibSpec, ...]
     is_cxx: bool
+    _pic: bool
 
     def _profile_flags(self, profile: OptimizationLevel) -> tuple[str, ...]:
         return profile.cflags
@@ -128,7 +140,7 @@ class CCompile:
     def _obj_path(self, src: Path, ctx: "BuildContext", out_dir: Path) -> Path:
         # Flatten source path relative to project into a dotted stem to avoid collisions
         try:
-            rel = src.relative_to(self.project.root)  # type: ignore[attr-defined]
+            rel = src.relative_to(self.project.root)
         except ValueError:
             rel = Path(src.name)
         stem = str(rel.with_suffix("")).replace("/", ".")
@@ -139,13 +151,13 @@ class CCompile:
         tool = ctx.toolchain.cxx if self.is_cxx else ctx.toolchain.cc
         tool = tool.resolved_for(
             workspace=ctx.workspace_root,
-            project=self.project.root,  # type: ignore[attr-defined]
-            cwd=self.project.root,  # type: ignore[attr-defined]
+            project=self.project.root,
+            cwd=self.project.root,
         )
         argv = tool.invoke([*self._compile_flags(ctx), "-c", str(src), "-o", str(obj)])
         return Command(
             argv=argv,
-            cwd=self.project.root,  # type: ignore[attr-defined]
+            cwd=self.project.root,
             label=f"compile {src.name}",
             inputs=(src,),
             outputs=(obj,),
@@ -175,7 +187,7 @@ class CCompile:
             if isinstance(spec, Target):
                 lib_target = spec
             elif isinstance(spec, str) and spec.startswith("::"):
-                lib_target = registry.resolve(spec, current=self.project)  # type: ignore[attr-defined]
+                lib_target = registry.resolve(spec, current=self.project)
             elif isinstance(spec, str) and spec.startswith("git+"):
                 raise NotImplementedError(f"remote refs not yet supported: {spec}")
             elif isinstance(spec, str):
@@ -184,7 +196,9 @@ class CCompile:
             else:
                 raise TypeError(f"bad lib spec: {spec!r}")
 
-            out = lib_target.output_path(ctx)  # type: ignore[attr-defined]
+            if not isinstance(lib_target, Artifact):
+                raise TypeError(f"cannot link against non-Artifact: {lib_target!r}")
+            out = lib_target.output_path(ctx)
             if isinstance(lib_target, ElfSharedObject):
                 args.extend([f"-L{out.parent}", f"-l{lib_target.name}"])
                 rpaths.add(str(out.parent))
@@ -210,11 +224,12 @@ class ElfBinary(CCompile, Artifact):
         undefs: tuple[str, ...] | list[str] = (),
         libs: tuple[LibSpec, ...] | list[LibSpec] = (),
         is_cxx: bool = False,
-        tests: dict | None = None,
+        tests: "dict[str, object] | None" = None,
         version: str | None = None,
         deps: dict[str, Target] | None = None,
-    ):
-        super().__init__(name=name, deps=deps, version=version)
+        doc: str | None = None,
+    ) -> None:
+        super().__init__(name=name, deps=deps, version=version, doc=doc)
         self.srcs = _resolve_sources(self.project.root, srcs)
         self.includes = _resolve_sources(self.project.root, includes)
         self.flags = tuple(flags)
@@ -230,7 +245,7 @@ class ElfBinary(CCompile, Artifact):
         if tests is not None:
             from devops.targets.tests import GoogleTest
 
-            GoogleTest(name=f"{name}Tests", target=self, **tests)
+            GoogleTest(name=f"{name}Tests", target=self, **tests)  # type: ignore[arg-type]
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / self.name
@@ -272,8 +287,8 @@ class ElfBinary(CCompile, Artifact):
 
 
 class ElfSharedObject(ElfBinary):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self._pic = True
 
     def output_path(self, ctx: "BuildContext") -> Path:
@@ -309,8 +324,9 @@ class StaticLibrary(CCompile, Artifact):
         is_cxx: bool = False,
         version: str | None = None,
         deps: dict[str, Target] | None = None,
-    ):
-        super().__init__(name=name, deps=deps, version=version)
+        doc: str | None = None,
+    ) -> None:
+        super().__init__(name=name, deps=deps, version=version, doc=doc)
         self.srcs = _resolve_sources(self.project.root, srcs)
         self.includes = _resolve_sources(self.project.root, includes)
         self.flags = tuple(flags)
@@ -357,8 +373,14 @@ class StaticLibrary(CCompile, Artifact):
 class HeadersOnly(Artifact):
     """A header bundle other targets can pick up as includes."""
 
-    def __init__(self, name: str, srcs: SourcesSpec, deps: dict[str, Target] | None = None):
-        super().__init__(name=name, deps=deps)
+    def __init__(
+        self,
+        name: str,
+        srcs: SourcesSpec,
+        deps: dict[str, Target] | None = None,
+        doc: str | None = None,
+    ) -> None:
+        super().__init__(name=name, deps=deps, doc=doc)
         self.headers = _resolve_sources(self.project.root, srcs)
 
     def output_path(self, ctx: "BuildContext") -> Path:

@@ -19,12 +19,12 @@ class Command:
     outputs: tuple[Path, ...] = field(default_factory=tuple)
 
     @classmethod
-    def argv_cmd(cls, argv: list[str] | tuple[str, ...], **kwargs) -> Command:
-        return cls(argv=tuple(argv), **kwargs)
+    def argv_cmd(cls, argv: list[str] | tuple[str, ...], **kwargs: object) -> Command:
+        return cls(argv=tuple(argv), **kwargs)  # type: ignore[arg-type]
 
     @classmethod
-    def shell_cmd(cls, line: str, **kwargs) -> Command:
-        return cls(argv=(line,), shell=True, **kwargs)
+    def shell_cmd(cls, line: str, **kwargs: object) -> Command:
+        return cls(argv=(line,), shell=True, **kwargs)  # type: ignore[arg-type]
 
     def rendered(self) -> str:
         if self.shell:

@@ -66,6 +66,6 @@ def run(cmd: Command, *, verbose: bool = False, dry_run: bool = False, use_cache
         cache.write_stamp(cmd)
 
 
-def run_all(cmds: list[Command], **kwargs) -> None:
+def run_all(cmds: list[Command], **kwargs: object) -> None:
     for c in cmds:
-        run(c, **kwargs)
+        run(c, **kwargs)  # type: ignore[arg-type]

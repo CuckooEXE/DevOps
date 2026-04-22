@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from devops.core.command import Command
 from devops.core.target import Artifact, Target
-from devops.targets.c_cpp import _resolve_sources
+from devops.targets.c_cpp import SourcesSpec, _resolve_sources
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -23,20 +23,21 @@ class PythonWheel(Artifact):
     def __init__(
         self,
         name: str,
-        srcs: str | list[str] | None = None,
+        srcs: SourcesSpec | None = None,
         pyproject: str | Path = "pyproject.toml",
-        tests: dict | None = None,
+        tests: dict[str, object] | None = None,
         version: str | None = None,
         deps: dict[str, Target] | None = None,
-    ):
-        super().__init__(name=name, deps=deps, version=version)
+        doc: str | None = None,
+    ) -> None:
+        super().__init__(name=name, deps=deps, version=version, doc=doc)
         self.srcs = _resolve_sources(self.project.root, srcs) if srcs else []
         self.pyproject = self.project.root / pyproject
         self._tests_spec = tests
         if tests is not None:
             from devops.targets.tests import Pytest
 
-            Pytest(name=f"{name}Tests", target=self, **tests)
+            Pytest(name=f"{name}Tests", target=self, **tests)  # type: ignore[arg-type]
 
     def output_path(self, ctx: "BuildContext") -> Path:
         # Actual filename is "<dist-name>-<version>-py3-none-any.whl" where
@@ -45,14 +46,17 @@ class PythonWheel(Artifact):
         return self.output_dir(ctx) / "dist"
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        # `python -m build` looks for pyproject.toml in cwd; run it from the
+        # dir containing the wheel's pyproject, not the project root.
+        wheel_cwd = self.pyproject.parent
         python = ctx.toolchain.python.resolved_for(
-            workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
+            workspace=ctx.workspace_root, project=self.project.root, cwd=wheel_cwd
         )
         out_dir = self.output_path(ctx)
         return [
             Command(
                 argv=python.invoke(["-m", "build", "--wheel", "--outdir", str(out_dir)]),
-                cwd=self.project.root,
+                cwd=wheel_cwd,
                 label=f"build wheel {self.name}",
                 inputs=(self.pyproject, *self.srcs),
                 outputs=(out_dir,),

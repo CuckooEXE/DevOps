@@ -23,3 +23,14 @@ devops = "devops.cli:main"
 [tool.setuptools.packages.find]
 include = ["devops*", "builder*"]
 exclude = ["tests*"]
+
+[tool.mypy]
+strict = true
+files = ["devops", "builder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# fixture/ contains a sample_project with its own tests that are driven via
+# `devops test` — don't let pytest's own collection descend in there.
+norecursedirs = ["fixtures", "build"]

@@ -89,7 +89,7 @@ class Toolchain:
     python: Tool = field(default_factory=lambda: Tool.of("python3"))
 
     @classmethod
-    def from_config(cls, cfg: dict | None) -> "Toolchain":
+    def from_config(cls, cfg: dict[str, object] | None) -> "Toolchain":
         tc = cls()
         if not cfg:
             return tc
@@ -97,6 +97,8 @@ class Toolchain:
         for key, spec in cfg.items():
             if key not in known:
                 raise ValueError(f"unknown toolchain entry {key!r}; known: {sorted(known)}")
+            if not isinstance(spec, (str, list, tuple, Tool)):
+                raise TypeError(f"toolchain[{key}] must be str/list/tuple/Tool, got {type(spec).__name__}")
             setattr(tc, key, Tool.of(spec))
         return tc
 

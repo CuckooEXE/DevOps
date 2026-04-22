@@ -13,6 +13,8 @@ import contextlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from devops.core.target import Project, Target
 
 
@@ -35,7 +37,7 @@ def _exit_project() -> None:
 
 
 @contextlib.contextmanager
-def active_project(project: "Project"):
+def active_project(project: "Project") -> "Iterator[Project]":
     _enter_project(project)
     try:
         yield project

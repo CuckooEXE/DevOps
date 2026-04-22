@@ -11,13 +11,85 @@ from devops import graph, registry
 from devops.context import BuildContext, load_toolchain
 from devops.core import runner
 from devops.core.command import Command
-from devops.core.target import Artifact, Script, Target
+from devops.core.target import Artifact, Project, Script, Target
 from devops.options import OptimizationLevel
 from devops.targets.tests import TestTarget
 from devops.workspace import discover_projects, find_workspace_root
 
 
-app = typer.Typer(add_completion=False, no_args_is_help=True, help="Multi-language Python-defined build system.")
+app = typer.Typer(add_completion=True, no_args_is_help=True, help="Multi-language Python-defined build system.")
+
+
+# ---------- completion helpers ----------
+
+
+def _complete_any_target(incomplete: str) -> list[str]:
+    """Return target names (short + qualified) matching `incomplete`.
+
+    Errors are swallowed because completion must never crash the shell.
+    """
+    try:
+        root = find_workspace_root(Path.cwd())
+        discover_projects(root)
+    except Exception:
+        return []
+    names: set[str] = set()
+    for t in registry.all_targets():
+        names.add(t.name)
+        names.add(t.qualified_name)
+    return sorted(n for n in names if n.startswith(incomplete))
+
+
+def _complete_artifact(incomplete: str) -> list[str]:
+    try:
+        root = find_workspace_root(Path.cwd())
+        discover_projects(root)
+    except Exception:
+        return []
+    names: set[str] = set()
+    for t in registry.all_targets():
+        if isinstance(t, Artifact):
+            names.add(t.name)
+            names.add(t.qualified_name)
+    return sorted(n for n in names if n.startswith(incomplete))
+
+
+def _complete_runnable(incomplete: str) -> list[str]:
+    """Scripts + executable Artifacts (ElfBinary / GoogleTest)."""
+    from devops.targets.c_cpp import ElfBinary, ElfSharedObject
+    from devops.targets.tests import GoogleTest
+
+    try:
+        root = find_workspace_root(Path.cwd())
+        discover_projects(root)
+    except Exception:
+        return []
+    names: set[str] = set()
+    for t in registry.all_targets():
+        if isinstance(t, Script):
+            names.add(t.name)
+            names.add(t.qualified_name)
+        elif isinstance(t, ElfBinary) and not isinstance(t, ElfSharedObject):
+            names.add(t.name)
+            names.add(t.qualified_name)
+        elif isinstance(t, GoogleTest):
+            names.add(t.name)
+            names.add(t.qualified_name)
+    return sorted(n for n in names if n.startswith(incomplete))
+
+
+def _complete_testable(incomplete: str) -> list[str]:
+    try:
+        root = find_workspace_root(Path.cwd())
+        discover_projects(root)
+    except Exception:
+        return []
+    names: set[str] = set()
+    for t in registry.all_targets():
+        if isinstance(t, TestTarget):
+            names.add(t.name)
+            names.add(t.qualified_name)
+    return sorted(n for n in names if n.startswith(incomplete))
 
 
 # ---------- plumbing ----------
@@ -36,7 +108,7 @@ def _prepare(profile: OptimizationLevel = OptimizationLevel.Debug, verbose: bool
     )
 
 
-def _resolve(name: str, *, current=None) -> Target:
+def _resolve(name: str, *, current: Project | None = None) -> Target:
     try:
         return registry.resolve(name, current=current)
     except LookupError as e:
@@ -65,7 +137,7 @@ def _build_transitively(t: Artifact, ctx: BuildContext) -> None:
 
 
 @app.command()
-def describe(names: list[str] = typer.Argument(None)):
+def describe(names: list[str] = typer.Argument(None, autocompletion=_complete_any_target)) -> None:
     """Pretty-print targets and their deps."""
     _prepare()
     targets = registry.all_targets()
@@ -75,15 +147,18 @@ def describe(names: list[str] = typer.Argument(None)):
         typer.echo(t.describe())
         if t.deps:
             typer.echo(f"  deps: {', '.join(f'{k}={v.qualified_name}' for k, v in t.deps.items())}")
+        if t.doc:
+            for line in t.doc.splitlines():
+                typer.echo(f"  | {line}")
         typer.echo("")
 
 
 @app.command()
 def build(
-    name: str,
+    name: str = typer.Argument(..., autocompletion=_complete_artifact),
     profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
-):
+) -> None:
     """Build an artifact (and its transitive deps)."""
     ctx = _prepare(profile=profile, verbose=verbose)
     t = _resolve(name)
@@ -95,7 +170,12 @@ def build(
 
 
 @app.command()
-def run(name: str, profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"), verbose: bool = False, dry_run: bool = typer.Option(False, "--dry-run")):
+def run(
+    name: str = typer.Argument(..., autocompletion=_complete_runnable),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+    verbose: bool = False,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
     """Execute an Artifact's output, or run a Script."""
     ctx = _prepare(profile=profile, verbose=verbose, dry_run=dry_run)
     t = _resolve(name)
@@ -121,7 +201,11 @@ def run(name: str, profile: OptimizationLevel = typer.Option(OptimizationLevel.D
 
 
 @app.command()
-def lint(names: list[str] = typer.Argument(None), profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"), verbose: bool = False):
+def lint(
+    names: list[str] = typer.Argument(None, autocompletion=_complete_artifact),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+    verbose: bool = False,
+) -> None:
     """Run lint commands for selected (or all) targets."""
     ctx = _prepare(profile=profile, verbose=verbose)
     targets: list[Target] = [_resolve(n) for n in names] if names else registry.all_targets()
@@ -147,7 +231,11 @@ def lint(names: list[str] = typer.Argument(None), profile: OptimizationLevel = t
 
 
 @app.command()
-def test(names: list[str] = typer.Argument(None), profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"), verbose: bool = False):
+def test(
+    names: list[str] = typer.Argument(None, autocompletion=_complete_testable),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+    verbose: bool = False,
+) -> None:
     """Build and run all (or selected) test targets."""
     ctx = _prepare(profile=profile, verbose=verbose)
     if names:
@@ -171,7 +259,7 @@ def test(names: list[str] = typer.Argument(None), profile: OptimizationLevel = t
 
 
 @app.command()
-def version(name: str = typer.Argument(None)):
+def version(name: str = typer.Argument(None, autocompletion=_complete_artifact)) -> None:
     """Print an artifact's version."""
     if name is None:
         typer.echo("error: artifact name required", err=True)
@@ -185,7 +273,10 @@ def version(name: str = typer.Argument(None)):
 
 
 @app.command()
-def cmds(name: str, profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile")):
+def cmds(
+    name: str = typer.Argument(..., autocompletion=_complete_artifact),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+) -> None:
     """Print the commands that would run for a build (without running them)."""
     ctx = _prepare(profile=profile)
     t = _resolve(name)
@@ -199,7 +290,10 @@ def cmds(name: str, profile: OptimizationLevel = typer.Option(OptimizationLevel.
 
 
 @app.command()
-def clean(names: list[str] = typer.Argument(None), profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile")):
+def clean(
+    names: list[str] = typer.Argument(None, autocompletion=_complete_artifact),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+) -> None:
     """Remove build outputs for selected (or all) artifacts."""
     ctx = _prepare(profile=profile)
     targets: list[Target] = [_resolve(n) for n in names] if names else registry.all_targets()
