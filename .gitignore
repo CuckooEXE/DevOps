@@ -9,6 +9,21 @@ __pycache__/
 # Build outputs (devops writes here)
 build/
 
+# Sphinx in-tree build (rare, but some flows)
+docs/_build/
+
 # Editable install artifacts
 pip-wheel-metadata/
 dist/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+
+# Developer-personal notes not tracked
+tests/fixtures/sample_project/TODO
+
+# Zig's per-project build cache
+.zig-cache/
+zig-out/

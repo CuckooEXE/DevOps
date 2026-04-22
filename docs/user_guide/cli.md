@@ -66,6 +66,32 @@ Missing tools surface as a single typed failure per target rather than a
 crash, so a clean `devops lint` locally doesn't require every team
 member to have every tool installed.
 
+## `devops doctor [--profile ...] [--verbose]`
+
+Pre-flight check: walks every registered target, unions declared
+`required_tools=` with the `argv[0]` of every non-shell `Command` the
+targets produce, and resolves each through `shutil.which`. Exits
+non-zero with a consolidated report if any are missing.
+
+```bash
+devops doctor             # silent on success
+devops doctor -v          # per-tool report, including who needs it
+```
+
+Run this **before** `devops build` in CI — a missing tool fails at
+pre-flight instead of mid-compile. For `CustomArtifact` / `Script`
+targets whose commands are shell strings, declare the tools they need
+via `required_tools=[...]` so they show up here.
+
+## `devops install [names...] [--profile ...]`
+
+Run selected (or all) `Install` targets — stage binaries/libs under a
+destination directory, or pip-install wheels. The Install target builds
+its artifact first, so this does the right thing without a prior
+`devops build`.
+
+See {doc}`install`.
+
 ## `devops test [names...] [--profile ...]`
 
 Build and run every test target (default: all; else the named subset).
@@ -81,4 +107,5 @@ Print the artifact's version. Falls back through:
 ## `devops clean [names...]`
 
 Remove build outputs for selected (or all) artifacts. Deletes the
-artifact's output directory.
+artifact's output directory — including any auto-managed venv (for
+`PythonApp`), cached wheels (for `PythonShiv`), or stamp files.

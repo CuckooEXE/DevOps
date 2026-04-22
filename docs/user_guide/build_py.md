@@ -107,6 +107,93 @@ and inherits the team flags automatically. See
 {doc}`../developer_guide/adding_a_target_type` for adding a fully new
 target type (not just a subclass).
 
+## Extra cache inputs
+
+For C-family (and Zig) targets, `devops` tracks headers automatically via
+`-MMD` depfiles — change a `#include`d header and the cache invalidates
+the compiles that depend on it. No declaration needed.
+
+For non-header inputs that the compiler can't see (linker scripts,
+codegen schemas, embedded data files), declare them with
+`extra_inputs=`:
+
+```python
+ElfBinary(
+    name="embedded",
+    srcs=glob("src/*.c"),
+    extra_inputs=["linker.ld", "fw_config.toml"],
+)
+```
+
+`extra_inputs` paths are folded into the final Command's input set (the
+link step for binaries/shared objects, the `ar` step for static libs),
+so touching any of them invalidates the final artifact — without
+forcing every compile step to re-run.
+
+## Declaring tool dependencies
+
+`devops doctor` discovers most tool dependencies automatically — it
+scans every Command's `argv[0]` and checks it's on PATH. But shell
+commands (used by `Script` and `CustomArtifact`) hide their real
+executables inside a shell string, so the scan can't see them.
+
+Declare them explicitly via `required_tools=`:
+
+```python
+CustomArtifact(
+    name="stripped",
+    inputs={"bin": myApp},
+    outputs=["app_stripped"],
+    cmds=["strip --strip-all {bin.output_path} -o {out[0]}"],
+    required_tools=["strip"],
+)
+
+Script(
+    name="deploy",
+    deps={"app": myApp},
+    cmds=["rsync -az {app.output_path} prod:/opt/"],
+    required_tools=["rsync"],
+)
+```
+
+`devops doctor` then lists these under the target's name and reports
+them as missing if absent. Run in CI before `devops build` so missing
+tools fail fast with a full list instead of one at a time mid-build.
+
+## Cross-project Python dependencies
+
+For `PythonApp` and `PythonShiv`, declare other `PythonWheel` targets
+as `python_deps=`:
+
+```python
+# Monorepo — same workspace
+shared_wheel = PythonWheel(name="shared", pyproject="shared/pyproject.toml")
+
+PythonApp(
+    name="app",
+    entry="app.cli:main",
+    pyproject="app/pyproject.toml",
+    python_deps=[shared_wheel],       # Target instance
+)
+
+# Cross-repo — remote reference (see also: Remote references)
+PythonShiv(
+    name="app",
+    entry="app.cli:main",
+    pyproject="app/pyproject.toml",
+    python_deps=[
+        "::shared",                                          # local "::name"
+        "git+ssh://git@github.com/acme/libfoo::libfoo",      # remote ref
+    ],
+)
+```
+
+At build time, `devops` builds each dep's wheel first (if not cached),
+then feeds the `dist/*.whl` into the app's venv (`pip install`) or the
+shiv `.pyz` (positional arg). `Target`-instance deps flow into
+`self.deps` for topo-sort; string refs resolve lazily at build time so
+no network traffic happens at `build.py` import.
+
 ## Documenting a target
 
 Every target accepts a `doc="..."` kwarg. It's shown under

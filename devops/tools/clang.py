@@ -3,8 +3,9 @@
 Each tool pulls the compile flag vector straight from the artifact via
 `_compile_flags(ctx)` — the same flags the build uses. No restatement.
 
-Tools are invoked through `ctx.toolchain.<tool>` so a Docker-wrapped
-clang-tidy (same container as cc) Just Works.
+Tools are invoked through `ctx.toolchain_for(target.arch).<tool>` so a
+Docker-wrapped clang-tidy (same container as cc) and per-arch lint
+toolchains Just Work.
 """
 
 from __future__ import annotations
@@ -28,14 +29,13 @@ def _cppcheck_flags_from_compile(compile_flags: tuple[str, ...]) -> list[str]:
 
 
 def lint_for_ccompile(target: "CCompile", ctx: "BuildContext") -> list[Command]:
-    from devops.targets.c_cpp import CCompile  # noqa: F401
-
     compile_flags = target._compile_flags(ctx)
     project_root = target.project.root
+    tc = ctx.toolchain_for(target.arch)
     cmds: list[Command] = []
 
     # clang-format --dry-run --Werror (reads .clang-format if present)
-    fmt = ctx.toolchain.clang_format.resolved_for(
+    fmt = tc.clang_format.resolved_for(
         workspace=ctx.workspace_root, project=project_root, cwd=project_root
     )
     cmds.append(
@@ -51,7 +51,7 @@ def lint_for_ccompile(target: "CCompile", ctx: "BuildContext") -> list[Command]:
     )
 
     # clang-tidy <src> -- <compile_flags>
-    tidy = ctx.toolchain.clang_tidy.resolved_for(
+    tidy = tc.clang_tidy.resolved_for(
         workspace=ctx.workspace_root, project=project_root, cwd=project_root
     )
     for src in target.srcs:
@@ -65,7 +65,7 @@ def lint_for_ccompile(target: "CCompile", ctx: "BuildContext") -> list[Command]:
         )
 
     # cppcheck (only -I/-D/-U consumed)
-    cppcheck = ctx.toolchain.cppcheck.resolved_for(
+    cppcheck = tc.cppcheck.resolved_for(
         workspace=ctx.workspace_root, project=project_root, cwd=project_root
     )
     cmds.append(

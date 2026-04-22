@@ -1,7 +1,6 @@
 # Architecture
 
-A short tour of the moving parts. Source under `/home/axelpersinger/
-Desktop/DevOps/devops/` unless noted.
+A short tour of the moving parts. Source under `devops/` unless noted.
 
 ## The user-facing surface: `builder/`
 

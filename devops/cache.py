@@ -1,7 +1,14 @@
 """Incremental build cache via stamp files.
 
 A Command is considered up-to-date when a stamp file next to its primary
-output contains sha256(argv + input mtimes) matching the current value.
+output contains ``sha256(argv + input mtimes [+ depfile headers])``
+matching the current value.
+
+Header tracking: when a Command declares a `depfile=` (typically a clang
+`-MMD -MF <path>` output), we parse it after the command has run and
+fold every listed path's mtime into the hash on subsequent runs. This
+catches ``#include`` graph changes even when the source file itself
+didn't change — the same trick make/ninja/Bazel use.
 """
 
 from __future__ import annotations
@@ -19,15 +26,73 @@ def _stamp_path(cmd: Command) -> Path | None:
     return cmd.outputs[0].with_suffix(cmd.outputs[0].suffix + ".stamp")
 
 
+def parse_depfile(depfile: Path) -> list[Path]:
+    """Parse a Makefile-style ``<target>: <dep> <dep> ...`` file.
+
+    Handles line continuations (``\\`` at end of line) and escaped spaces
+    (``\\ ``). Ignores the target portion (everything up to the first
+    unescaped ``:``). Returns deduplicated paths in source order.
+    """
+    try:
+        raw = depfile.read_text()
+    except (FileNotFoundError, OSError):
+        return []
+
+    # Join backslash-newline continuations
+    text = raw.replace("\\\n", " ")
+    # Strip the target: (and anything before it on the first non-empty line)
+    if ":" in text:
+        _, _, text = text.partition(":")
+
+    # Tokenise; honour `\ ` as an escaped space inside a filename
+    tokens: list[str] = []
+    current: list[str] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text) and text[i + 1] == " ":
+            current.append(" ")
+            i += 2
+            continue
+        if c in " \t\r\n":
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(c)
+        i += 1
+    if current:
+        tokens.append("".join(current))
+
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for tok in tokens:
+        if not tok:
+            continue
+        p = Path(tok)
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _stat_contribution(h: "hashlib._Hash", p: Path) -> None:
+    try:
+        st = p.stat()
+        h.update(f"|{p}|{st.st_mtime_ns}|{st.st_size}".encode())
+    except FileNotFoundError:
+        h.update(f"|{p}|missing".encode())
+
+
 def _current_hash(cmd: Command) -> str:
     h = hashlib.sha256()
     h.update(shlex.join(cmd.argv).encode() if not cmd.shell else cmd.argv[0].encode())
     for p in cmd.inputs:
-        try:
-            st = p.stat()
-            h.update(f"|{p}|{st.st_mtime_ns}|{st.st_size}".encode())
-        except FileNotFoundError:
-            h.update(f"|{p}|missing".encode())
+        _stat_contribution(h, p)
+    # Fold in discovered headers if the command emitted a depfile last run.
+    if cmd.depfile is not None and cmd.depfile.is_file():
+        for hdr in parse_depfile(cmd.depfile):
+            _stat_contribution(h, hdr)
     return h.hexdigest()
 
 

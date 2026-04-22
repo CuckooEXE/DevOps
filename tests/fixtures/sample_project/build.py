@@ -3,14 +3,22 @@ sugar/subclassing patterns the docs promise."""
 
 from builder import (
     COMMON_C_FLAGS,
+    CObjectFile,
+    CustomArtifact,
     ElfBinary,
     ElfSharedObject,
     GoogleTest,
     HeadersOnly,
+    Install,
+    LdBinary,
+    PythonApp,
+    PythonShiv,
     PythonWheel,
     Script,
     SphinxDocs,
     StaticLibrary,
+    ZigBinary,
+    ZigTest,
     glob,
 )
 
@@ -137,4 +145,129 @@ SphinxDocs(
     srcs=glob("docs/*"),
     conf="docs",
     doc="HTML rendering of the sample project's own docs/ directory.",
+)
+
+
+# ---------------------------------------------------------------------------
+# Zig target — delegates to `zig build` against zigapp/build.zig.
+# ---------------------------------------------------------------------------
+
+zigapp = ZigBinary(
+    name="zigapp",
+    project_dir="zigapp",
+    doc="Zig-built binary produced by `zig build` against zigapp/build.zig.",
+)
+
+ZigTest(
+    name="zigappTests",
+    project_dir="zigapp",
+    doc="Runs `zig build test` against zigapp/build.zig.",
+)
+
+
+# ---------------------------------------------------------------------------
+# CustomArtifact — arbitrary post-processing (here: strip MyCoolApp).
+# ---------------------------------------------------------------------------
+
+CustomArtifact(
+    name="MyCoolAppStripped",
+    inputs={"bin": myCoolApp},
+    outputs=["MyCoolApp.stripped"],
+    cmds=[
+        "cp {bin.output_path} {out[0]}",
+        "strip --strip-all {out[0]}",
+    ],
+    doc="Copies MyCoolApp and runs `strip --strip-all` — demo of CustomArtifact.",
+)
+
+
+# ---------------------------------------------------------------------------
+# PythonApp — runnable with auto-venv, honours requirements.txt.
+# ---------------------------------------------------------------------------
+
+PythonApp(
+    name="mypkg-app",
+    entry="mypkg.cli:main",
+    pyproject="pytools/pyproject.toml",
+    requirements="pytools/requirements.txt",
+    doc="Dev-friendly runner for mypkg.cli:main with auto-managed venv.",
+)
+
+# Same CLI, but delivered as a single-file .pyz.
+PythonShiv(
+    name="mypkg-shiv",
+    entry="mypkg.cli:main",
+    pyproject="pytools/pyproject.toml",
+    requirements="pytools/requirements.txt",
+    doc="Distributable single-file .pyz bundling mypkg + its deps.",
+)
+
+
+# ---------------------------------------------------------------------------
+# Install targets — stage built artifacts outside the build tree.
+# Use a fixture-local /tmp path so `devops install` works without root.
+# ---------------------------------------------------------------------------
+
+Install(
+    name="install-app",
+    artifact=myCoolApp,
+    dest="/tmp/sample_project_install/bin",
+    mode="0755",
+    doc="Stage MyCoolApp under /tmp/sample_project_install/bin (no sudo).",
+)
+
+Install(
+    name="install-lib",
+    artifact=myLib,
+    dest="/tmp/sample_project_install/lib",
+    mode="0644",
+    doc="Stage libMyCoolLib.so for runtime discovery by the installed binary.",
+)
+
+Install(
+    name="install-headers",
+    artifact=headers,
+    dest="/tmp/sample_project_install/include",
+    doc="Copy the public header bundle under /tmp/sample_project_install/include.",
+)
+
+Install(
+    name="install-pkg",
+    artifact=mypkg,
+    pip_args=("--user", "--break-system-packages", "--force-reinstall"),
+    doc="pip-install the mypkg wheel into the user site (dogfooding).",
+)
+
+
+# ---------------------------------------------------------------------------
+# CObjectFile + LdBinary — classic compile / link split. Here we produce a
+# relocatable object (`ld -r`) that combines two translation units into
+# one .o, which is the most portable ld demo (no libc startup needed).
+# ---------------------------------------------------------------------------
+
+relocParts = CObjectFile(
+    name="relocParts",
+    srcs=glob("reloc/*.c"),
+    doc="Compiles reloc/part_a.c and reloc/part_b.c to separate .o files.",
+)
+
+LdBinary(
+    name="relocCombined",
+    objs=[relocParts],
+    extra_ld_flags=("-r",),  # produce a relocatable (partial-link) output
+    doc="Merges relocParts .o files into one relocatable object via `ld -r`.",
+)
+
+
+# ---------------------------------------------------------------------------
+# CustomArtifact with required_tools= so `devops doctor` can preflight it.
+# ---------------------------------------------------------------------------
+
+CustomArtifact(
+    name="MyCoolAppSize",
+    inputs={"bin": myCoolApp},
+    outputs=["MyCoolApp.size.txt"],
+    cmds=["size {bin.output_path} > {out[0]}"],
+    required_tools=["size"],
+    doc="Runs `size` on MyCoolApp and captures the per-section byte counts.",
 )

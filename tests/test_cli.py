@@ -59,7 +59,7 @@ def test_build_produces_expected_artifact(tmp_path, monkeypatch):
     monkeypatch.chdir(ws)
     result = CliRunner().invoke(app, ["build", "hello"])
     assert result.exit_code == 0, result.stdout
-    artifact = ws / "build" / "Debug" / ws.name / "hello" / "hello"
+    artifact = ws / "build" / "Debug" / "host" / ws.name / "hello" / "hello"
     assert artifact.is_file()
 
 
@@ -106,7 +106,7 @@ def test_clean_removes_output(tmp_path, monkeypatch):
     ws = _make_workspace(tmp_path)
     monkeypatch.chdir(ws)
     assert CliRunner().invoke(app, ["build", "hello"]).exit_code == 0
-    artifact = ws / "build" / "Debug" / ws.name / "hello" / "hello"
+    artifact = ws / "build" / "Debug" / "host" / ws.name / "hello" / "hello"
     assert artifact.is_file()
     assert CliRunner().invoke(app, ["clean", "hello"]).exit_code == 0
     assert not artifact.is_file()

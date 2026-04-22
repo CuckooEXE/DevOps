@@ -5,16 +5,21 @@ from pathlib import Path
 from devops import registry
 from devops.options import COMMON_C_FLAGS, OptimizationLevel
 from devops.targets.c_cpp import (
+    CObjectFile,
     ElfBinary,
     ElfSharedObject,
     HeadersOnly,
+    LdBinary,
     StaticLibrary,
     glob_sources,
 )
+from devops.targets.custom import CustomArtifact
 from devops.targets.docs import SphinxDocs
-from devops.targets.python import PythonWheel
+from devops.targets.install import Install
+from devops.targets.python import PythonApp, PythonShiv, PythonWheel
 from devops.targets.script import Script
 from devops.targets.tests import GoogleTest, Pytest
+from devops.targets.zig import ZigBinary, ZigTest
 
 
 def glob(
@@ -42,10 +47,18 @@ __all__ = [
     "ElfSharedObject",
     "StaticLibrary",
     "HeadersOnly",
+    "CObjectFile",
+    "LdBinary",
+    "CustomArtifact",
     "PythonWheel",
+    "PythonApp",
+    "PythonShiv",
     "SphinxDocs",
     "Script",
     "GoogleTest",
     "Pytest",
+    "Install",
+    "ZigBinary",
+    "ZigTest",
     "glob",
 ]

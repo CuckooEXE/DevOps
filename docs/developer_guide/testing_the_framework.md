@@ -18,6 +18,20 @@ pytest
 # or: python3 -m pytest tests/ -q
 ```
 
+## Coverage
+
+`pytest-cov` is wired via `pyproject.toml` — a coverage report prints
+under the test output automatically:
+
+```bash
+pytest --cov                  # summary with per-file coverage
+pytest --cov --cov-report=html    # browseable htmlcov/index.html
+```
+
+Coverage config lives under `[tool.coverage.run]` + `[tool.coverage.report]`
+in `pyproject.toml`. Current baseline is ~85% with branch coverage
+enabled; new code should keep the overall number from dropping.
+
 The suite covers:
 
 - `test_tool.py` — `Tool` argv expansion + placeholder substitution

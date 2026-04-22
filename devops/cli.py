@@ -8,11 +8,12 @@ from pathlib import Path
 import typer
 
 from devops import graph, registry
-from devops.context import BuildContext, load_toolchain
+from devops.context import BuildContext, load_toolchains
 from devops.core import runner
 from devops.core.command import Command
 from devops.core.target import Artifact, Project, Script, Target
 from devops.options import OptimizationLevel
+from devops.targets.install import Install
 from devops.targets.tests import TestTarget
 from devops.workspace import discover_projects, find_workspace_root
 
@@ -55,9 +56,11 @@ def _complete_artifact(incomplete: str) -> list[str]:
 
 
 def _complete_runnable(incomplete: str) -> list[str]:
-    """Scripts + executable Artifacts (ElfBinary / GoogleTest)."""
+    """Scripts + executable Artifacts (ElfBinary / GoogleTest / Python apps)."""
     from devops.targets.c_cpp import ElfBinary, ElfSharedObject
+    from devops.targets.python import PythonApp, PythonShiv
     from devops.targets.tests import GoogleTest
+    from devops.targets.zig import ZigBinary
 
     try:
         root = find_workspace_root(Path.cwd())
@@ -72,7 +75,7 @@ def _complete_runnable(incomplete: str) -> list[str]:
         elif isinstance(t, ElfBinary) and not isinstance(t, ElfSharedObject):
             names.add(t.name)
             names.add(t.qualified_name)
-        elif isinstance(t, GoogleTest):
+        elif isinstance(t, (GoogleTest, ZigBinary, PythonApp, PythonShiv)):
             names.add(t.name)
             names.add(t.qualified_name)
     return sorted(n for n in names if n.startswith(incomplete))
@@ -92,19 +95,35 @@ def _complete_testable(incomplete: str) -> list[str]:
     return sorted(n for n in names if n.startswith(incomplete))
 
 
+def _complete_installable(incomplete: str) -> list[str]:
+    try:
+        root = find_workspace_root(Path.cwd())
+        discover_projects(root)
+    except Exception:
+        return []
+    names: set[str] = set()
+    for t in registry.all_targets():
+        if isinstance(t, Install):
+            names.add(t.name)
+            names.add(t.qualified_name)
+    return sorted(n for n in names if n.startswith(incomplete))
+
+
 # ---------- plumbing ----------
 
 
 def _prepare(profile: OptimizationLevel = OptimizationLevel.Debug, verbose: bool = False, dry_run: bool = False) -> BuildContext:
     root = find_workspace_root(Path.cwd())
     discover_projects(root)
+    toolchains = load_toolchains(root)
     return BuildContext(
         workspace_root=root,
         build_dir=root / "build",
         profile=profile,
         verbose=verbose,
         dry_run=dry_run,
-        toolchain=load_toolchain(root),
+        toolchain=toolchains["host"],
+        toolchains=toolchains,
     )
 
 
@@ -287,6 +306,88 @@ def cmds(
         if isinstance(dep, Artifact):
             for c in dep.build_cmds(ctx):
                 typer.echo(c.rendered())
+
+
+@app.command(name="install")
+def install_cmd(
+    names: list[str] = typer.Argument(None, autocompletion=_complete_installable),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run Install targets: stage binaries/libs under a dest, or pip install wheels.
+
+    With no names, runs every Install target in the workspace.
+    """
+    ctx = _prepare(profile=profile, verbose=verbose)
+    if names:
+        targets = [_resolve(n) for n in names]
+    else:
+        targets = [t for t in registry.all_targets() if isinstance(t, Install)]
+    if not targets:
+        typer.echo("no Install targets declared", err=True)
+        raise typer.Exit(1)
+    for t in targets:
+        if not isinstance(t, Install):
+            typer.echo(f"error: {t.qualified_name} is a {type(t).__name__}, not an Install", err=True)
+            raise typer.Exit(1)
+        # Build the artifact (+ its transitive deps) first
+        _build_transitively(t.artifact, ctx)
+        _run_commands(t.install_cmds(ctx), ctx)
+        typer.echo(f"installed: {t.qualified_name}")
+
+
+@app.command()
+def doctor(
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Pre-flight check: every tool any target needs is on PATH.
+
+    Walks every registered target, unions declared ``required_tools=`` with
+    the ``argv[0]`` of every non-shell Command it produces, resolves each
+    through ``shutil.which``. Exits non-zero if any tool is missing.
+
+    Run this early in CI (before `devops build`) so a missing tool fails
+    fast with a consolidated list rather than surfacing mid-build.
+    """
+    import shutil
+
+    ctx = _prepare(profile=profile, verbose=verbose)
+
+    # Skip argv[0]s that point at things this workspace *produces* —
+    # e.g. a GoogleTest's argv[0] is the test binary itself, which isn't
+    # a "tool to install" but an earlier target's output.
+    build_dir_str = str(ctx.build_dir)
+    needed: dict[str, list[str]] = {}  # tool -> list of targets that need it
+    for t in registry.all_targets():
+        for tool in t.collect_tool_names(ctx):
+            if tool.startswith(build_dir_str):
+                continue  # build-produced artifact, not a tool
+            needed.setdefault(tool, []).append(t.qualified_name)
+
+    missing: list[str] = []
+    for tool in sorted(needed):
+        if shutil.which(tool) is None and not Path(tool).is_file():
+            missing.append(tool)
+
+    if verbose:
+        typer.echo(f"checked {len(needed)} distinct tool(s) across {len(registry.all_targets())} target(s)")
+        for tool in sorted(needed):
+            status = "MISSING" if tool in missing else "ok"
+            consumers = ", ".join(sorted(set(needed[tool])))
+            typer.echo(f"  [{status:>7}] {tool:<30} — {consumers}")
+
+    if missing:
+        typer.echo("", err=True)
+        typer.echo(f"error: {len(missing)} tool(s) missing from PATH:", err=True)
+        for tool in missing:
+            consumers = ", ".join(sorted(set(needed[tool])))
+            typer.echo(f"  {tool}  ({consumers})", err=True)
+        typer.echo("", err=True)
+        typer.echo("Install them (apt / pip / vendor download) or wrap them via [toolchain] in devops.toml.", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"doctor ok — {len(needed)} tool(s) present")
 
 
 @app.command()

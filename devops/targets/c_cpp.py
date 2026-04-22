@@ -105,6 +105,7 @@ class CCompile:
     name: str
     project: Project
     deps: dict[str, Target]
+    arch: str
 
     # Set by the combined class's __init__:
     srcs: list[Path]
@@ -148,19 +149,31 @@ class CCompile:
 
     def _compile_command(self, src: Path, ctx: "BuildContext", out_dir: Path) -> Command:
         obj = self._obj_path(src, ctx, out_dir)
-        tool = ctx.toolchain.cxx if self.is_cxx else ctx.toolchain.cc
+        depfile = obj.with_suffix(obj.suffix + ".d")
+        tc = ctx.toolchain_for(self.arch)
+        tool = tc.cxx if self.is_cxx else tc.cc
         tool = tool.resolved_for(
             workspace=ctx.workspace_root,
             project=self.project.root,
             cwd=self.project.root,
         )
-        argv = tool.invoke([*self._compile_flags(ctx), "-c", str(src), "-o", str(obj)])
+        # -MMD: emit a Makefile-style depfile listing user-header #includes
+        # (skipping system headers). -MF picks the output location. The
+        # cache reads this on the *next* invocation to detect header
+        # changes that don't otherwise touch the .c file mtime.
+        argv = tool.invoke([
+            *self._compile_flags(ctx),
+            "-MMD", "-MF", str(depfile),
+            "-c", str(src),
+            "-o", str(obj),
+        ])
         return Command(
             argv=argv,
             cwd=self.project.root,
             label=f"compile {src.name}",
             inputs=(src,),
             outputs=(obj,),
+            depfile=depfile,
         )
 
     def _compile_all(self, ctx: "BuildContext", out_dir: Path) -> tuple[list[Command], list[Path]]:
@@ -188,8 +201,11 @@ class CCompile:
                 lib_target = spec
             elif isinstance(spec, str) and spec.startswith("::"):
                 lib_target = registry.resolve(spec, current=self.project)
-            elif isinstance(spec, str) and spec.startswith("git+"):
-                raise NotImplementedError(f"remote refs not yet supported: {spec}")
+            elif isinstance(spec, str) and "://" in spec:
+                # Remote ref: file://, git+ssh://, http(s)://
+                from devops.remote import resolve_remote_ref
+
+                lib_target = resolve_remote_ref(spec)
             elif isinstance(spec, str):
                 args.append(f"-l{spec}")
                 continue
@@ -228,8 +244,13 @@ class ElfBinary(CCompile, Artifact):
         version: str | None = None,
         deps: dict[str, Target] | None = None,
         doc: str | None = None,
+        arch: str = "host",
+        extra_inputs: "tuple[str | Path, ...] | list[str | Path] | None" = None,
     ) -> None:
-        super().__init__(name=name, deps=deps, version=version, doc=doc)
+        super().__init__(
+            name=name, deps=deps, version=version, doc=doc, arch=arch,
+            extra_inputs=extra_inputs,
+        )
         self.srcs = _resolve_sources(self.project.root, srcs)
         self.includes = _resolve_sources(self.project.root, includes)
         self.flags = tuple(flags)
@@ -254,7 +275,8 @@ class ElfBinary(CCompile, Artifact):
         out_dir = self.output_dir(ctx)
         compile_cmds, objs = self._compile_all(ctx, out_dir)
         lib_args, extra_inputs = self._link_flags_for_libs(ctx)
-        tool = (ctx.toolchain.cxx if self.is_cxx else ctx.toolchain.cc).resolved_for(
+        tc = ctx.toolchain_for(self.arch)
+        tool = (tc.cxx if self.is_cxx else tc.cc).resolved_for(
             workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
         )
         link_argv = tool.invoke([*(str(o) for o in objs), *lib_args, "-o", str(self.output_path(ctx))])
@@ -262,7 +284,7 @@ class ElfBinary(CCompile, Artifact):
             argv=link_argv,
             cwd=self.project.root,
             label=f"link {self.name}",
-            inputs=(*objs, *extra_inputs),
+            inputs=(*objs, *extra_inputs, *self._extra_inputs),
             outputs=(self.output_path(ctx),),
         )
         return [*compile_cmds, link_cmd]
@@ -275,10 +297,11 @@ class ElfBinary(CCompile, Artifact):
     def describe(self) -> str:
         src_list = ", ".join(s.name for s in self.srcs)
         lib_list = ", ".join(
-            l if isinstance(l, str) else l.qualified_name for l in self.libs
+            spec if isinstance(spec, str) else spec.qualified_name
+            for spec in self.libs
         ) or "-"
         return (
-            f"{type(self).__name__} {self.qualified_name}\n"
+            f"{type(self).__name__} {self.qualified_name} ({self.arch})\n"
             f"  srcs:     {src_list}\n"
             f"  includes: {', '.join(str(p) for p in self.includes) or '-'}\n"
             f"  libs:     {lib_list}\n"
@@ -298,7 +321,8 @@ class ElfSharedObject(ElfBinary):
         out_dir = self.output_dir(ctx)
         compile_cmds, objs = self._compile_all(ctx, out_dir)
         lib_args, extra_inputs = self._link_flags_for_libs(ctx)
-        tool = (ctx.toolchain.cxx if self.is_cxx else ctx.toolchain.cc).resolved_for(
+        tc = ctx.toolchain_for(self.arch)
+        tool = (tc.cxx if self.is_cxx else tc.cc).resolved_for(
             workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
         )
         link_argv = tool.invoke(["-shared", *(str(o) for o in objs), *lib_args, "-o", str(self.output_path(ctx))])
@@ -306,7 +330,7 @@ class ElfSharedObject(ElfBinary):
             argv=link_argv,
             cwd=self.project.root,
             label=f"link lib{self.name}.so",
-            inputs=(*objs, *extra_inputs),
+            inputs=(*objs, *extra_inputs, *self._extra_inputs),
             outputs=(self.output_path(ctx),),
         )
         return [*compile_cmds, link_cmd]
@@ -325,8 +349,13 @@ class StaticLibrary(CCompile, Artifact):
         version: str | None = None,
         deps: dict[str, Target] | None = None,
         doc: str | None = None,
+        arch: str = "host",
+        extra_inputs: "tuple[str | Path, ...] | list[str | Path] | None" = None,
     ) -> None:
-        super().__init__(name=name, deps=deps, version=version, doc=doc)
+        super().__init__(
+            name=name, deps=deps, version=version, doc=doc, arch=arch,
+            extra_inputs=extra_inputs,
+        )
         self.srcs = _resolve_sources(self.project.root, srcs)
         self.includes = _resolve_sources(self.project.root, includes)
         self.flags = tuple(flags)
@@ -342,7 +371,7 @@ class StaticLibrary(CCompile, Artifact):
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
         out_dir = self.output_dir(ctx)
         compile_cmds, objs = self._compile_all(ctx, out_dir)
-        ar = ctx.toolchain.ar.resolved_for(
+        ar = ctx.toolchain_for(self.arch).ar.resolved_for(
             workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
         )
         ar_argv = ar.invoke(["rcs", str(self.output_path(ctx)), *(str(o) for o in objs)])
@@ -352,7 +381,7 @@ class StaticLibrary(CCompile, Artifact):
                 argv=ar_argv,
                 cwd=self.project.root,
                 label=f"archive lib{self.name}.a",
-                inputs=tuple(objs),
+                inputs=(*objs, *self._extra_inputs),
                 outputs=(self.output_path(ctx),),
             ),
         ]
@@ -367,6 +396,227 @@ class StaticLibrary(CCompile, Artifact):
             f"StaticLibrary {self.qualified_name}\n"
             f"  srcs:     {', '.join(s.name for s in self.srcs)}\n"
             f"  includes: {', '.join(str(p) for p in self.includes) or '-'}"
+        )
+
+
+class CObjectFile(CCompile, Artifact):
+    """Compile sources to `.o` files — no linking.
+
+    Output layout::
+
+        <output_dir>/
+          obj/<flattened>.o    # one .o per source
+          obj/...
+
+    Pass a CObjectFile to ``LdBinary(objs=[...])`` to drive the link step
+    separately. This splits the compile/link phases the way classic
+    Makefiles do:
+
+        gcc -c main.c -o main.o
+        ld  main.o -o main
+    """
+
+    def __init__(
+        self,
+        name: str,
+        srcs: SourcesSpec,
+        includes: SourcesSpec | None = None,
+        flags: tuple[str, ...] = (),
+        defs: dict[str, str | None] | None = None,
+        undefs: tuple[str, ...] | list[str] = (),
+        is_cxx: bool = False,
+        pic: bool = False,
+        version: str | None = None,
+        deps: dict[str, Target] | None = None,
+        doc: str | None = None,
+        arch: str = "host",
+        extra_inputs: "tuple[str | Path, ...] | list[str | Path] | None" = None,
+    ) -> None:
+        super().__init__(
+            name=name, deps=deps, version=version, doc=doc, arch=arch,
+            extra_inputs=extra_inputs,
+        )
+        self.srcs = _resolve_sources(self.project.root, srcs)
+        self.includes = _resolve_sources(self.project.root, includes)
+        self.flags = tuple(flags)
+        self.defs = dict(defs or {})
+        self.undefs = tuple(undefs)
+        self.libs = ()
+        self.is_cxx = is_cxx
+        self._pic = pic
+
+    def output_path(self, ctx: "BuildContext") -> Path:
+        # Directory containing the produced .o files.
+        return self.output_dir(ctx) / "obj"
+
+    def object_files(self, ctx: "BuildContext") -> list[Path]:
+        """The exact .o paths this target produces (one per source)."""
+        out_dir = self.output_dir(ctx)
+        return [self._obj_path(src, ctx, out_dir) for src in self.srcs]
+
+    def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        out_dir = self.output_dir(ctx)
+        compile_cmds, _ = self._compile_all(ctx, out_dir)
+        return compile_cmds
+
+    def lint_cmds(self, ctx: "BuildContext") -> list[Command]:
+        from devops.tools import clang
+
+        return clang.lint_for_ccompile(self, ctx)
+
+    def describe(self) -> str:
+        return (
+            f"CObjectFile {self.qualified_name} ({self.arch})\n"
+            f"  srcs:     {', '.join(s.name for s in self.srcs)}\n"
+            f"  includes: {', '.join(str(p) for p in self.includes) or '-'}"
+        )
+
+
+class LdBinary(Artifact):
+    """Link objects into a binary via ``ld`` directly (no cc driver).
+
+    Use this for freestanding / embedded / bootloader-style builds where
+    you control every linker flag. For normal userspace binaries prefer
+    ``ElfBinary`` (drives cc, which handles libc startup files, default
+    search paths, rpath, etc.).
+
+    Args:
+        name:           target / filename
+        objs:           list of CObjectFile targets, static archives
+                        (``Path``), or literal strings (``-lfoo``, etc.)
+        linker_script:  path to a linker script (``-T <script>``). Flows
+                        into cache inputs so edits invalidate the link.
+        map_file:       filename to emit a linker map as (``-Map <path>``).
+                        Lives alongside the binary under ``output_dir``.
+        entry:          entry symbol (``-e <sym>``), e.g. ``"_start"``.
+        extra_ld_flags: appended verbatim before the object list.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        objs: list[CObjectFile | str | Path],
+        linker_script: str | Path | None = None,
+        map_file: str | None = None,
+        entry: str | None = None,
+        extra_ld_flags: tuple[str, ...] = (),
+        libs: "tuple[str | Path | Target, ...] | list[str | Path | Target]" = (),
+        version: str | None = None,
+        deps: dict[str, Target] | None = None,
+        doc: str | None = None,
+        arch: str = "host",
+        extra_inputs: "tuple[str | Path, ...] | list[str | Path] | None" = None,
+    ) -> None:
+        super().__init__(
+            name=name, deps=deps, version=version, doc=doc, arch=arch,
+            extra_inputs=extra_inputs,
+        )
+        self.objs = tuple(objs)
+        self.map_file = map_file
+        self.entry = entry
+        self.extra_ld_flags = tuple(extra_ld_flags)
+        self.libs = tuple(libs)
+
+        self.linker_script: Path | None = None
+        if linker_script is not None:
+            p = Path(linker_script)
+            if not p.is_absolute():
+                p = (self.project.root / p).resolve()
+            self.linker_script = p
+
+        # Targets in `objs` or `libs` flow into deps so topo-sort builds
+        # them before this ld step.
+        for o in self.objs:
+            if isinstance(o, Target):
+                self.deps[f"_obj_{o.name}"] = o
+        for lib in self.libs:
+            if isinstance(lib, Target):
+                self.deps[f"_lib_{lib.name}"] = lib
+
+    def output_path(self, ctx: "BuildContext") -> Path:
+        return self.output_dir(ctx) / self.name
+
+    def map_path(self, ctx: "BuildContext") -> Path | None:
+        return self.output_dir(ctx) / self.map_file if self.map_file else None
+
+    def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        obj_args: list[str] = []
+        inputs: list[Path] = []
+
+        for o in self.objs:
+            if isinstance(o, CObjectFile):
+                for f in o.object_files(ctx):
+                    obj_args.append(str(f))
+                    inputs.append(f)
+            elif isinstance(o, Path) or (isinstance(o, str) and not o.startswith("-")):
+                p = Path(o)
+                if not p.is_absolute():
+                    p = (self.project.root / p).resolve()
+                obj_args.append(str(p))
+                inputs.append(p)
+            elif isinstance(o, str):
+                # Literal flag-form token like `-lfoo`, `--whole-archive`, etc.
+                obj_args.append(o)
+            else:
+                raise TypeError(f"bad objs entry: {o!r}")
+
+        lib_args: list[str] = []
+        for lib in self.libs:
+            if isinstance(lib, StaticLibrary):
+                lib_path = lib.output_path(ctx)
+                lib_args.append(str(lib_path))
+                inputs.append(lib_path)
+            elif isinstance(lib, str):
+                lib_args.append(lib if lib.startswith("-") else f"-l{lib}")
+            elif isinstance(lib, Path):
+                lib_args.append(str(lib))
+                inputs.append(lib)
+            else:
+                raise TypeError(
+                    f"LdBinary libs must be StaticLibrary / str / Path, got {type(lib).__name__}"
+                )
+
+        out = self.output_path(ctx)
+        argv_parts: list[str] = []
+        if self.entry:
+            argv_parts.extend(["-e", self.entry])
+        if self.linker_script is not None:
+            argv_parts.extend(["-T", str(self.linker_script)])
+            inputs.append(self.linker_script)
+        map_path = self.map_path(ctx)
+        if map_path is not None:
+            argv_parts.extend(["-Map", str(map_path)])
+        argv_parts.extend(self.extra_ld_flags)
+        argv_parts.extend(obj_args)
+        argv_parts.extend(lib_args)
+        argv_parts.extend(["-o", str(out)])
+
+        ld = ctx.toolchain_for(self.arch).ld.resolved_for(
+            workspace=ctx.workspace_root,
+            project=self.project.root,
+            cwd=self.project.root,
+        )
+        outputs: tuple[Path, ...] = (out,) if map_path is None else (out, map_path)
+        return [
+            Command(
+                argv=ld.invoke(argv_parts),
+                cwd=self.project.root,
+                label=f"ld {self.name}",
+                inputs=(*inputs, *self._extra_inputs),
+                outputs=outputs,
+            )
+        ]
+
+    def describe(self) -> str:
+        obj_summary = ", ".join(
+            o.name if isinstance(o, Target) else str(o) for o in self.objs
+        ) or "-"
+        return (
+            f"LdBinary {self.qualified_name} ({self.arch})\n"
+            f"  objs:          {obj_summary}\n"
+            f"  linker_script: {self.linker_script or '-'}\n"
+            f"  map_file:      {self.map_file or '-'}\n"
+            f"  entry:         {self.entry or '-'}"
         )
 
 

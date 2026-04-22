@@ -26,6 +26,10 @@ user_guide/target_types
 user_guide/scripts
 user_guide/testing
 user_guide/docker_toolchains
+user_guide/cross_compile
+user_guide/remote_refs
+user_guide/install
+user_guide/ci_docker
 user_guide/cli
 ```
 

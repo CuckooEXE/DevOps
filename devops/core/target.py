@@ -32,6 +32,7 @@ class Target(ABC):
         name: str,
         deps: dict[str, "Target"] | None = None,
         doc: str | None = None,
+        required_tools: tuple[str, ...] | list[str] | None = None,
     ):
         if not name or not isinstance(name, str):
             raise ValueError(f"Target name must be a non-empty string, got {name!r}")
@@ -41,8 +42,43 @@ class Target(ABC):
         # their common leading whitespace — same rules as Python docstrings,
         # so triple-quoted multi-line `doc="""..."""` renders cleanly.
         self.doc: str = inspect.cleandoc(doc) if doc else ""
+        # Tools this target needs on PATH that the argv[0] scan can't see
+        # (shell commands, pipelines, tools invoked via CustomArtifact).
+        # The scan picks up `argv[0]` from every non-shell Command
+        # automatically; `required_tools` is the escape hatch.
+        self.required_tools: tuple[str, ...] = tuple(required_tools or ())
         self.project: Project = registry.current_project()
         registry.register(self)
+
+    def collect_tool_names(self, ctx: "BuildContext") -> set[str]:
+        """Union of declared + auto-detected tool names this target needs.
+
+        Auto-detects ``argv[0]`` from every ``build_cmds`` / ``lint_cmds``
+        / ``test_cmds`` Command that isn't shell-form (shell commands hide
+        their real executable inside a shell string — users must declare
+        those via ``required_tools=``).
+        """
+        tools: set[str] = set(self.required_tools)
+
+        def _scan(cmds: list["Command"]) -> None:
+            for c in cmds:
+                if not c.shell and c.argv:
+                    tools.add(c.argv[0])
+
+        # Probe each Command list the target may produce. Not every target
+        # implements all four; `getattr` with a None default keeps this
+        # subtype-agnostic without tripping mypy on attribute access.
+        for method_name in ("build_cmds", "lint_cmds", "test_cmds", "run_cmds"):
+            method = getattr(self, method_name, None)
+            if method is None:
+                continue
+            try:
+                _scan(method(ctx))
+            except Exception:
+                # Don't let a single target's probe failure hide missing
+                # tools in other targets.
+                continue
+        return tools
 
     @abstractmethod
     def describe(self) -> str:
@@ -57,7 +93,13 @@ class Target(ABC):
 
 
 class Artifact(Target):
-    """A target that produces output."""
+    """A target that produces output.
+
+    `arch` is the architecture this artifact is compiled for. Defaults to
+    ``"host"``. Targets that are architecture-independent (PythonWheel,
+    SphinxDocs) ignore it but it still flows into the output path so
+    host-only vs cross-compile trees don't clobber each other.
+    """
 
     def __init__(
         self,
@@ -65,9 +107,38 @@ class Artifact(Target):
         deps: dict[str, Target] | None = None,
         version: str | None = None,
         doc: str | None = None,
+        arch: str = "host",
+        extra_inputs: "tuple[str | Path, ...] | list[str | Path] | None" = None,
+        required_tools: tuple[str, ...] | list[str] | None = None,
     ):
-        super().__init__(name=name, deps=deps, doc=doc)
+        super().__init__(name=name, deps=deps, doc=doc, required_tools=required_tools)
         self._version_override = version
+        self.arch = arch
+        self._extra_inputs: tuple[Path, ...] = self._resolve_extra_inputs(extra_inputs)
+
+    def _resolve_extra_inputs(
+        self,
+        specs: "tuple[str | Path, ...] | list[str | Path] | None",
+    ) -> tuple[Path, ...]:
+        """Resolve extra_inputs= relative to the project root.
+
+        These paths are folded into the final Command's `inputs` tuple
+        (usually the link/archive step) so changes to linker scripts,
+        codegen schemas, or embedded data files invalidate the cache.
+        """
+        if not specs:
+            return ()
+        resolved: list[Path] = []
+        for s in specs:
+            p = Path(s)
+            if not p.is_absolute():
+                p = (self.project.root / p).resolve()
+            resolved.append(p)
+        return tuple(resolved)
+
+    @property
+    def extra_inputs(self) -> tuple[Path, ...]:
+        return self._extra_inputs
 
     @abstractmethod
     def build_cmds(self, ctx: "BuildContext") -> list["Command"]:
@@ -90,7 +161,7 @@ class Artifact(Target):
         ...
 
     def output_dir(self, ctx: "BuildContext") -> Path:
-        return ctx.project_out(self.project.name, self.name)
+        return ctx.project_out(self.project.name, self.name, self.arch)
 
     def version(self) -> str:
         return resolve_version(self.project.root, self._version_override)
@@ -106,8 +177,9 @@ class Script(Target):
         cmds: list[str] | None = None,
         script: str | Path | None = None,
         doc: str | None = None,
+        required_tools: tuple[str, ...] | list[str] | None = None,
     ):
-        super().__init__(name=name, deps=deps, doc=doc)
+        super().__init__(name=name, deps=deps, doc=doc, required_tools=required_tools)
         if (cmds is None) == (script is None):
             raise ValueError(
                 f"Script {name!r} must declare exactly one of cmds=... or script=..."

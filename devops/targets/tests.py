@@ -44,7 +44,9 @@ class GoogleTest(CCompile, TestTarget):
         version: str | None = None,
         doc: str | None = None,
     ) -> None:
-        super().__init__(name=name, deps=deps, version=version, doc=doc)
+        # Tests always build for host arch — you want `devops test` to run
+        # locally even when the thing under test is cross-compiled.
+        super().__init__(name=name, deps=deps, version=version, doc=doc, arch="host")
         if not isinstance(target, CCompile):
             raise TypeError(
                 f"GoogleTest target= must be a CCompile artifact, got {type(target).__name__}"
@@ -80,7 +82,7 @@ class GoogleTest(CCompile, TestTarget):
         out_dir = self.output_dir(ctx)
         compile_cmds, objs = self._compile_all(ctx, out_dir)
         lib_args, extra_inputs = self._link_flags_for_libs(ctx)
-        tool = ctx.toolchain.cxx.resolved_for(
+        tool = ctx.toolchain_for(self.arch).cxx.resolved_for(
             workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
         )
         link_argv = tool.invoke([*(str(o) for o in objs), *lib_args, "-o", str(self.output_path(ctx))])
