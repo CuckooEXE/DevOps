@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devops-builder"
+version = "0.1.0"
+description = "Python-defined multi-language build system"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "build",
+]
+
+[project.scripts]
+devops = "devops.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["devops*", "builder*"]
+exclude = ["tests*"]

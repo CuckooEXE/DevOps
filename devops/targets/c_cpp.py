@@ -1,0 +1,383 @@
+"""C/C++ artifact types and the CCompile mixin.
+
+CCompile centralises flag composition. `_compile_flags(src)` returns the
+exact flags passed to the compiler — reused verbatim by the lint tools
+(clang-tidy, cppcheck) so the user never restates flags.
+
+Flag composition vs tool invocation is deliberately split:
+    _compile_flags(src)    # ("-O0", "-ggdb", "-I./include", "-DFOO=1", ...)
+    _compile_argv(src)     # (*ctx.toolchain.cc.argv, *_compile_flags, "-c", src, "-o", obj)
+"""
+
+from __future__ import annotations
+
+import glob
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from devops.core.command import Command
+from devops.core.target import Artifact, Target
+from devops.options import OptimizationLevel
+
+if TYPE_CHECKING:
+    from devops.context import BuildContext
+
+
+SourcesSpec = str | Path | list[str | Path] | tuple[str | Path, ...]
+LibSpec = str | Target  # a Target ref, "::name", "name" (system), "git+ssh://..." (v2)
+
+
+def _resolve_sources(project_root: Path, specs: SourcesSpec | None) -> list[Path]:
+    """Literal-path resolution.
+
+    Strings/Paths here are *not* glob-expanded — use `builder.glob(...)` for
+    globbing. This makes globbing an explicit, auditable step.
+    """
+    if specs is None:
+        return []
+    if isinstance(specs, (str, Path)):
+        specs = [specs]
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for s in specs:
+        p = Path(s)
+        if not p.is_absolute():
+            p = (project_root / p).resolve()
+        if "*" in str(p):
+            raise ValueError(
+                f"glob pattern {s!r} cannot be used directly — wrap it in builder.glob(...)"
+            )
+        if not p.exists():
+            raise FileNotFoundError(f"source not found: {s} (looked at {p})")
+        if p not in seen:
+            seen.add(p)
+            paths.append(p)
+    return paths
+
+
+def glob_sources(
+    project_root: Path,
+    patterns: SourcesSpec,
+    exclude: SourcesSpec | None = None,
+    allow_empty: bool = False,
+) -> list[Path]:
+    """Bazel-style glob. Returns files matching any pattern, minus `exclude`."""
+    if isinstance(patterns, (str, Path)):
+        patterns = [patterns]
+    if exclude is None:
+        exclude = []
+    elif isinstance(exclude, (str, Path)):
+        exclude = [exclude]
+
+    matched: set[Path] = set()
+    for pat in patterns:
+        full = str((project_root / Path(pat)).resolve())
+        hits = glob.glob(full, recursive=True)
+        for h in hits:
+            p = Path(h)
+            if p.is_file():
+                matched.add(p)
+
+    excluded: set[Path] = set()
+    for pat in exclude:
+        full = str((project_root / Path(pat)).resolve())
+        for h in glob.glob(full, recursive=True):
+            excluded.add(Path(h))
+
+    result = sorted(matched - excluded)
+    if not result and not allow_empty:
+        raise FileNotFoundError(
+            f"glob({patterns!r}) matched nothing; pass allow_empty=True to permit."
+        )
+    return result
+
+
+class CCompile:
+    """Mixin: shared flag computation for C-family artifacts."""
+
+    # Subclasses set these as instance attrs in __init__
+    srcs: list[Path]
+    includes: list[Path]
+    flags: tuple[str, ...]
+    defs: dict[str, str | None]
+    undefs: tuple[str, ...]
+    libs: tuple[LibSpec, ...]
+    is_cxx: bool
+
+    def _profile_flags(self, profile: OptimizationLevel) -> tuple[str, ...]:
+        return profile.cflags
+
+    def _compile_flags(self, ctx: "BuildContext") -> tuple[str, ...]:
+        """Flags independent of the source being compiled.
+
+        clang-tidy / cppcheck consume these verbatim.
+        """
+        out: list[str] = []
+        out.extend(self._profile_flags(ctx.profile))
+        for inc in self.includes:
+            out.append(f"-I{inc}")
+        for k, v in self.defs.items():
+            out.append(f"-D{k}" if v is None else f"-D{k}={v}")
+        for k in self.undefs:
+            out.append(f"-U{k}")
+        out.extend(self.flags)
+        if getattr(self, "_pic", False):
+            out.append("-fPIC")
+        return tuple(out)
+
+    def _obj_path(self, src: Path, ctx: "BuildContext", out_dir: Path) -> Path:
+        # Flatten source path relative to project into a dotted stem to avoid collisions
+        try:
+            rel = src.relative_to(self.project.root)  # type: ignore[attr-defined]
+        except ValueError:
+            rel = Path(src.name)
+        stem = str(rel.with_suffix("")).replace("/", ".")
+        return out_dir / "obj" / f"{stem}.o"
+
+    def _compile_command(self, src: Path, ctx: "BuildContext", out_dir: Path) -> Command:
+        obj = self._obj_path(src, ctx, out_dir)
+        tool = ctx.toolchain.cxx if self.is_cxx else ctx.toolchain.cc
+        tool = tool.resolved_for(
+            workspace=ctx.workspace_root,
+            project=self.project.root,  # type: ignore[attr-defined]
+            cwd=self.project.root,  # type: ignore[attr-defined]
+        )
+        argv = tool.invoke([*self._compile_flags(ctx), "-c", str(src), "-o", str(obj)])
+        return Command(
+            argv=argv,
+            cwd=self.project.root,  # type: ignore[attr-defined]
+            label=f"compile {src.name}",
+            inputs=(src,),
+            outputs=(obj,),
+        )
+
+    def _compile_all(self, ctx: "BuildContext", out_dir: Path) -> tuple[list[Command], list[Path]]:
+        cmds: list[Command] = []
+        objs: list[Path] = []
+        for src in self.srcs:
+            cmd = self._compile_command(src, ctx, out_dir)
+            cmds.append(cmd)
+            objs.append(cmd.outputs[0])
+        return cmds, objs
+
+    def _link_flags_for_libs(self, ctx: "BuildContext") -> tuple[list[str], list[Path]]:
+        """Return (linker args, extra input paths).
+
+        Adds an rpath for each linked shared object so the produced binary
+        can locate its libs at runtime without requiring LD_LIBRARY_PATH.
+        """
+        from devops import registry
+
+        args: list[str] = []
+        extra_inputs: list[Path] = []
+        rpaths: set[str] = set()
+        for spec in self.libs:
+            if isinstance(spec, Target):
+                lib_target = spec
+            elif isinstance(spec, str) and spec.startswith("::"):
+                lib_target = registry.resolve(spec, current=self.project)  # type: ignore[attr-defined]
+            elif isinstance(spec, str) and spec.startswith("git+"):
+                raise NotImplementedError(f"remote refs not yet supported: {spec}")
+            elif isinstance(spec, str):
+                args.append(f"-l{spec}")
+                continue
+            else:
+                raise TypeError(f"bad lib spec: {spec!r}")
+
+            out = lib_target.output_path(ctx)  # type: ignore[attr-defined]
+            if isinstance(lib_target, ElfSharedObject):
+                args.extend([f"-L{out.parent}", f"-l{lib_target.name}"])
+                rpaths.add(str(out.parent))
+                extra_inputs.append(out)
+            elif isinstance(lib_target, StaticLibrary):
+                args.append(str(out))
+                extra_inputs.append(out)
+            else:
+                raise TypeError(f"cannot link against {type(lib_target).__name__}")
+        for rp in sorted(rpaths):
+            args.append(f"-Wl,-rpath,{rp}")
+        return args, extra_inputs
+
+
+class ElfBinary(CCompile, Artifact):
+    def __init__(
+        self,
+        name: str,
+        srcs: SourcesSpec,
+        includes: SourcesSpec | None = None,
+        flags: tuple[str, ...] = (),
+        defs: dict[str, str | None] | None = None,
+        undefs: tuple[str, ...] | list[str] = (),
+        libs: tuple[LibSpec, ...] | list[LibSpec] = (),
+        is_cxx: bool = False,
+        tests: dict | None = None,
+        version: str | None = None,
+        deps: dict[str, Target] | None = None,
+    ):
+        super().__init__(name=name, deps=deps, version=version)
+        self.srcs = _resolve_sources(self.project.root, srcs)
+        self.includes = _resolve_sources(self.project.root, includes)
+        self.flags = tuple(flags)
+        self.defs = dict(defs or {})
+        self.undefs = tuple(undefs)
+        self.libs = tuple(libs)
+        self.is_cxx = is_cxx
+        self._pic = False
+        # libs that point at other Targets flow into deps so topo-sort builds them first
+        for spec in self.libs:
+            if isinstance(spec, Target):
+                self.deps[f"_lib_{spec.name}"] = spec
+        if tests is not None:
+            from devops.targets.tests import GoogleTest
+
+            GoogleTest(name=f"{name}Tests", target=self, **tests)
+
+    def output_path(self, ctx: "BuildContext") -> Path:
+        return self.output_dir(ctx) / self.name
+
+    def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        out_dir = self.output_dir(ctx)
+        compile_cmds, objs = self._compile_all(ctx, out_dir)
+        lib_args, extra_inputs = self._link_flags_for_libs(ctx)
+        tool = (ctx.toolchain.cxx if self.is_cxx else ctx.toolchain.cc).resolved_for(
+            workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
+        )
+        link_argv = tool.invoke([*(str(o) for o in objs), *lib_args, "-o", str(self.output_path(ctx))])
+        link_cmd = Command(
+            argv=link_argv,
+            cwd=self.project.root,
+            label=f"link {self.name}",
+            inputs=(*objs, *extra_inputs),
+            outputs=(self.output_path(ctx),),
+        )
+        return [*compile_cmds, link_cmd]
+
+    def lint_cmds(self, ctx: "BuildContext") -> list[Command]:
+        from devops.tools import clang
+
+        return clang.lint_for_ccompile(self, ctx)
+
+    def describe(self) -> str:
+        src_list = ", ".join(s.name for s in self.srcs)
+        lib_list = ", ".join(
+            l if isinstance(l, str) else l.qualified_name for l in self.libs
+        ) or "-"
+        return (
+            f"{type(self).__name__} {self.qualified_name}\n"
+            f"  srcs:     {src_list}\n"
+            f"  includes: {', '.join(str(p) for p in self.includes) or '-'}\n"
+            f"  libs:     {lib_list}\n"
+            f"  flags:    {' '.join(self.flags) or '-'}"
+        )
+
+
+class ElfSharedObject(ElfBinary):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pic = True
+
+    def output_path(self, ctx: "BuildContext") -> Path:
+        return self.output_dir(ctx) / f"lib{self.name}.so"
+
+    def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        out_dir = self.output_dir(ctx)
+        compile_cmds, objs = self._compile_all(ctx, out_dir)
+        lib_args, extra_inputs = self._link_flags_for_libs(ctx)
+        tool = (ctx.toolchain.cxx if self.is_cxx else ctx.toolchain.cc).resolved_for(
+            workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
+        )
+        link_argv = tool.invoke(["-shared", *(str(o) for o in objs), *lib_args, "-o", str(self.output_path(ctx))])
+        link_cmd = Command(
+            argv=link_argv,
+            cwd=self.project.root,
+            label=f"link lib{self.name}.so",
+            inputs=(*objs, *extra_inputs),
+            outputs=(self.output_path(ctx),),
+        )
+        return [*compile_cmds, link_cmd]
+
+
+class StaticLibrary(CCompile, Artifact):
+    def __init__(
+        self,
+        name: str,
+        srcs: SourcesSpec,
+        includes: SourcesSpec | None = None,
+        flags: tuple[str, ...] = (),
+        defs: dict[str, str | None] | None = None,
+        undefs: tuple[str, ...] | list[str] = (),
+        is_cxx: bool = False,
+        version: str | None = None,
+        deps: dict[str, Target] | None = None,
+    ):
+        super().__init__(name=name, deps=deps, version=version)
+        self.srcs = _resolve_sources(self.project.root, srcs)
+        self.includes = _resolve_sources(self.project.root, includes)
+        self.flags = tuple(flags)
+        self.defs = dict(defs or {})
+        self.undefs = tuple(undefs)
+        self.libs = ()
+        self.is_cxx = is_cxx
+        self._pic = False
+
+    def output_path(self, ctx: "BuildContext") -> Path:
+        return self.output_dir(ctx) / f"lib{self.name}.a"
+
+    def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        out_dir = self.output_dir(ctx)
+        compile_cmds, objs = self._compile_all(ctx, out_dir)
+        ar = ctx.toolchain.ar.resolved_for(
+            workspace=ctx.workspace_root, project=self.project.root, cwd=self.project.root
+        )
+        ar_argv = ar.invoke(["rcs", str(self.output_path(ctx)), *(str(o) for o in objs)])
+        return [
+            *compile_cmds,
+            Command(
+                argv=ar_argv,
+                cwd=self.project.root,
+                label=f"archive lib{self.name}.a",
+                inputs=tuple(objs),
+                outputs=(self.output_path(ctx),),
+            ),
+        ]
+
+    def lint_cmds(self, ctx: "BuildContext") -> list[Command]:
+        from devops.tools import clang
+
+        return clang.lint_for_ccompile(self, ctx)
+
+    def describe(self) -> str:
+        return (
+            f"StaticLibrary {self.qualified_name}\n"
+            f"  srcs:     {', '.join(s.name for s in self.srcs)}\n"
+            f"  includes: {', '.join(str(p) for p in self.includes) or '-'}"
+        )
+
+
+class HeadersOnly(Artifact):
+    """A header bundle other targets can pick up as includes."""
+
+    def __init__(self, name: str, srcs: SourcesSpec, deps: dict[str, Target] | None = None):
+        super().__init__(name=name, deps=deps)
+        self.headers = _resolve_sources(self.project.root, srcs)
+
+    def output_path(self, ctx: "BuildContext") -> Path:
+        return self.output_dir(ctx) / "include"
+
+    def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        out = self.output_path(ctx)
+        cmds = [Command.shell_cmd(f"mkdir -p {out}", label=f"prepare {self.name}")]
+        for h in self.headers:
+            dst = out / h.relative_to(self.project.root)
+            cmds.append(
+                Command(
+                    argv=("cp", str(h), str(dst)),
+                    label=f"stage {h.name}",
+                    inputs=(h,),
+                    outputs=(dst,),
+                )
+            )
+        return cmds
+
+    def describe(self) -> str:
+        return f"HeadersOnly {self.qualified_name}: {len(self.headers)} header(s)"

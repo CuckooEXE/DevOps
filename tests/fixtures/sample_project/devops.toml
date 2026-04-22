@@ -1,0 +1,8 @@
+# Workspace config for the sample fixture.
+# Override a tool here if your env needs a docker-wrapped toolchain, e.g.:
+#
+#   [toolchain]
+#   cc = ["docker", "run", "--rm",
+#         "-v", "{workspace}:{workspace}", "-w", "{cwd}",
+#         "ghcr.io/team/toolchain:v3", "clang"]
+#

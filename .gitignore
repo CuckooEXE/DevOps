@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build outputs (devops writes here)
+build/
+
+# Editable install artifacts
+pip-wheel-metadata/
+dist/
