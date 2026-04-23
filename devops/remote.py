@@ -1,34 +1,26 @@
-"""Resolve ``<url>::<target-name>`` references to targets in external projects.
+"""Resolve typed remote references (``GitRef`` / ``TarballRef`` /
+``DirectoryRef``) to targets in external projects.
 
-Supported URL schemes:
+Each Ref names an external project plus a target within it. The resolver
+fetches the project, imports its ``build.py``, and returns the referenced
+target. Fetched content is cached under ``~/.cache/devops/remotes/<hash>/``;
+remove that directory to force a re-fetch.
 
-=================  =========================================================
-Scheme             Behaviour
-=================  =========================================================
-``file://``        Local path. A directory is copied (or rather, registered
-                   in place). A ``.tar.gz`` / ``.tgz`` / ``.tar`` archive is
-                   extracted. Supports absolute and relative paths.
-``git+ssh://``     Git clone over SSH. Optional ``@<ref>`` suffix (branch,
-                   tag, or sha) selects a revision after clone.
-``http(s)://``     Download the URL as a tarball and extract.
-=================  =========================================================
+================  ============================================================
+Ref               Behaviour
+================  ============================================================
+``GitRef``        ``git clone`` over ssh / https / file. Optional ``ref=``
+                  selects a branch, tag, or sha after clone.
+``TarballRef``    Tarball at a local path or http(s) URL. Extracted on fetch.
+                  Suffixes: ``.tar.gz`` / ``.tgz`` / ``.tar`` / ``.tar.xz`` /
+                  ``.tar.bz2``.
+``DirectoryRef``  Local directory (absolute or relative to cwd). Copied into
+                  the cache.
+================  ============================================================
 
-Resolved content is cached under ``~/.cache/devops/remotes/<hash>/``. Remove
-the cache dir to force a re-fetch. Each remote is treated as its own
-``Project`` — its ``build.py`` is imported and its registered targets become
-addressable under the remote's project name.
-
-Full spec form::
-
-    <url>[@<ref>]::<TargetName>
-
-    git+ssh://git@github.com/acme/libfoo@v1.2.3::mylib
-    file:///abs/path/to/project::mylib
-    file://./rel/project.tar.gz::mylib
-    https://example.com/releases/libfoo-1.0.tar.gz::mylib
-
-Resolution happens lazily during link-time (inside ``_link_flags_for_libs``),
-so no network traffic occurs at build.py import time.
+Each remote is registered as its own ``Project``; its targets become
+addressable under ``remote.<name>::<TargetName>``. Resolution happens
+lazily at link-time, so no network traffic occurs at build.py import.
 """
 
 from __future__ import annotations
@@ -39,6 +31,7 @@ import subprocess
 import tarfile
 import tempfile
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -57,15 +50,92 @@ CACHE_ROOT = Path.home() / ".cache" / "devops" / "remotes"
 _resolved: dict[str, str] = {}
 
 
-def resolve_remote_ref(spec: str) -> "Target":
-    """Parse ``<url>[@<ref>]::<Target>`` and return the referenced target."""
-    if "::" not in spec:
-        raise ValueError(
-            f"remote ref must end with '::<target-name>', got {spec!r}"
+# ----- typed references ---------------------------------------------------
+#
+# Build files pass these instead of a raw "<scheme>://...::<target>" string
+# so the intent (git clone vs. tarball vs. directory) is explicit at the
+# call site and validated at construction. Each Ref lowers to the legacy
+# spec string consumed by resolve_remote_ref via .to_spec().
+
+
+class Ref:
+    """Base class for remote refs. Subclasses carry their own fields."""
+
+    target: str
+
+    def to_spec(self) -> str:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class GitRef(Ref):
+    """Git clone reference over ssh, https, or local file://.
+
+    ``url`` is passed to ``git clone`` after prefixing with ``git+`` — supply
+    the bare URL without ``git+`` (e.g. ``ssh://git@github.com/acme/libfoo``
+    or ``https://github.com/acme/libfoo.git``). ``ref`` optionally selects
+    a branch/tag/sha after clone.
+    """
+
+    url: str
+    target: str
+    ref: str | None = None
+
+    def to_spec(self) -> str:
+        url = f"{self.url}@{self.ref}" if self.ref is not None else self.url
+        return f"git+{url}::{self.target}"
+
+
+@dataclass(frozen=True)
+class TarballRef(Ref):
+    """Tarball reference — local file path or http(s) URL.
+
+    Local paths (absolute or relative to cwd) are rewritten to ``file://``.
+    Supported suffixes: ``.tar.gz``, ``.tgz``, ``.tar``, ``.tar.xz``,
+    ``.tar.bz2``.
+    """
+
+    url: str
+    target: str
+
+    def to_spec(self) -> str:
+        if "://" in self.url:
+            return f"{self.url}::{self.target}"
+        p = Path(self.url)
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        return f"file://{p}::{self.target}"
+
+
+@dataclass(frozen=True)
+class DirectoryRef(Ref):
+    """Local directory reference — absolute or relative path.
+
+    Relative paths resolve against the current working directory at
+    resolution time.
+    """
+
+    path: str
+    target: str
+
+    def to_spec(self) -> str:
+        p = Path(self.path)
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        return f"file://{p}::{self.target}"
+
+
+def resolve_remote_ref(ref: Ref) -> "Target":
+    """Fetch the project named by ``ref`` and return the referenced target."""
+    if not isinstance(ref, Ref):
+        raise TypeError(
+            f"resolve_remote_ref expects a Ref "
+            f"(GitRef / TarballRef / DirectoryRef); got {type(ref).__name__}"
         )
+    if not ref.target:
+        raise ValueError(f"ref is missing a target name: {ref!r}")
+    spec = ref.to_spec()
     url, target_name = spec.rsplit("::", 1)
-    if not target_name:
-        raise ValueError(f"remote ref missing target name: {spec!r}")
 
     if url in _resolved:
         project_name = _resolved[url]

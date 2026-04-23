@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from devops.core.command import Command
 from devops.core.target import Artifact, Target
+from devops.remote import Ref
 from devops.targets.c_cpp import SourcesSpec, _resolve_sources
 
 if TYPE_CHECKING:
@@ -101,7 +102,7 @@ def _default_requirements(project_root: Path) -> Path | None:
 
 
 def _resolve_python_dep(
-    spec: "PythonWheel | str",
+    spec: "PythonWheel | str | Ref",
     project: "object",
 ) -> "PythonWheel":
     """Resolve one python_deps= entry to a PythonWheel.
@@ -109,32 +110,33 @@ def _resolve_python_dep(
     Accepts:
       - a PythonWheel target instance (monorepo case)
       - ``"::name"``  — local ref, must already be in the registry
-      - ``"<scheme>://…::name"`` — remote ref (file/git+ssh/http(s))
+      - a typed ``Ref`` — GitRef / TarballRef / DirectoryRef
     """
     from devops import registry
-    from devops.remote import resolve_remote_ref
+    from devops.remote import Ref, resolve_remote_ref
 
     if isinstance(spec, PythonWheel):
         return spec
-    if isinstance(spec, str):
-        if "://" in spec:
-            target = resolve_remote_ref(spec)
-        elif spec.startswith("::"):
-            target = registry.resolve(spec, current=project)  # type: ignore[arg-type]
-        else:
+    if isinstance(spec, Ref):
+        target = resolve_remote_ref(spec)
+    elif isinstance(spec, str):
+        if not spec.startswith("::"):
             raise ValueError(
-                f"python_deps string {spec!r} must be '::name' (local) or "
-                f"'<scheme>://…::name' (remote); bare names aren't supported."
+                f"python_deps string {spec!r} must be '::name' (local). "
+                f"For remote wheels use GitRef / TarballRef / DirectoryRef."
             )
-        if not isinstance(target, PythonWheel):
-            raise TypeError(
-                f"python_deps must resolve to a PythonWheel; {spec!r} "
-                f"resolved to {type(target).__name__}"
-            )
-        return target
-    raise TypeError(
-        f"python_deps entries must be PythonWheel or str, got {type(spec).__name__}"
-    )
+        target = registry.resolve(spec, current=project)  # type: ignore[arg-type]
+    else:
+        raise TypeError(
+            f"python_deps entries must be PythonWheel, str, or Ref; got "
+            f"{type(spec).__name__}"
+        )
+    if not isinstance(target, PythonWheel):
+        raise TypeError(
+            f"python_deps must resolve to a PythonWheel; {spec!r} "
+            f"resolved to {type(target).__name__}"
+        )
+    return target
 
 
 class PythonApp(Artifact):
@@ -174,7 +176,7 @@ class PythonApp(Artifact):
         requirements: str | Path | None = None,
         srcs: SourcesSpec | None = None,
         use_venv: bool = True,
-        python_deps: "list[PythonWheel | str] | None" = None,
+        python_deps: "list[PythonWheel | str | Ref] | None" = None,
         version: str | None = None,
         deps: dict[str, Target] | None = None,
         doc: str | None = None,
@@ -189,7 +191,7 @@ class PythonApp(Artifact):
             else _default_requirements(self.project.root)
         )
         self.srcs = _resolve_sources(self.project.root, srcs) if srcs else []
-        self._python_deps_spec: list[PythonWheel | str] = list(python_deps or [])
+        self._python_deps_spec: list[PythonWheel | str | Ref] = list(python_deps or [])
 
         # Monorepo case: any PythonWheel passed as a Target-instance flows
         # into deps so topo-sort builds it before this app. String-form
@@ -402,7 +404,7 @@ class PythonShiv(Artifact):
         pyproject: str | Path,
         requirements: str | Path | None = None,
         python_shebang: str | None = None,
-        python_deps: "list[PythonWheel | str] | None" = None,
+        python_deps: "list[PythonWheel | str | Ref] | None" = None,
         version: str | None = None,
         deps: dict[str, Target] | None = None,
         doc: str | None = None,
@@ -420,7 +422,7 @@ class PythonShiv(Artifact):
             else _default_requirements(self.project.root)
         )
         self.python_shebang = python_shebang
-        self._python_deps_spec: list[PythonWheel | str] = list(python_deps or [])
+        self._python_deps_spec: list[PythonWheel | str | Ref] = list(python_deps or [])
         for d in self._python_deps_spec:
             if isinstance(d, PythonWheel):
                 self.deps[f"_pydep_{d.name}"] = d

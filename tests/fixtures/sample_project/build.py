@@ -1,10 +1,13 @@
 """Sample workspace project. Exercises every MVP target type + the
 sugar/subclassing patterns the docs promise."""
 
+from pathlib import Path
+
 from builder import (
     COMMON_C_FLAGS,
     CObjectFile,
     CustomArtifact,
+    DirectoryRef,
     ElfBinary,
     ElfSharedObject,
     GoogleTest,
@@ -91,10 +94,23 @@ class TeamBinary(ElfBinary):
 myCoolApp = TeamBinary(
     name="MyCoolApp",
     srcs=glob(["main.c", "src/*.c"], exclude=["src/lib.c"]),
-    includes=["include"],
+    # `headers` is a HeadersOnly target — the binary picks up -I<staged dir>
+    # automatically, and `headers` flows into deps for topo-sort.
+    includes=[headers, "vendor/greet_remote/include"],
     defs={"FOO": None, "BAR": "baz"},
     undefs=["QUX"],
-    libs=[myLib, mathStatic],
+    libs=[
+        myLib,
+        mathStatic,
+        # Typed remote reference. DirectoryRef is hermetic (no network);
+        # swap for GitRef("ssh://...", target="greetRemote", ref="v1.2.3")
+        # or TarballRef("https://.../pkg.tar.gz", target=...) in real use.
+        # Absolute path here so resolution isn't cwd-sensitive at link time.
+        DirectoryRef(
+            str(Path(__file__).parent / "vendor" / "greet_remote"),
+            target="greetRemote",
+        ),
+    ],
     tests={"srcs": glob("tests/test_math_static.cc")},
     doc="""User-facing binary. Subclasses ElfBinary via TeamBinary so the
         team's `-Werror` policy is enforced; also demonstrates the

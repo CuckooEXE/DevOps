@@ -1,59 +1,101 @@
 # Remote references
 
-Declare a `libs=` entry using one of four URL schemes and `devops` fetches,
-builds, and links the referenced target automatically.
-
-## Syntax
-
-```
-<url>[@<ref>]::<TargetName>
-```
-
-The trailing `::<TargetName>` picks a target from the remote project's
-`build.py`; the optional `@<ref>` (git only) picks a branch, tag, or sha.
-
-## Supported schemes
-
-### `file://`
-
-Local directory or tarball. Absolute or relative:
+Declare a `libs=` entry using a typed *reference* — `GitRef`, `TarballRef`,
+or `DirectoryRef` — and `devops` fetches, builds, and links the
+referenced target automatically.
 
 ```python
+from builder import DirectoryRef, ElfBinary, GitRef, TarballRef, glob
+
 ElfBinary(
     name="app",
     srcs=glob("main.c"),
     libs=[
-        "file:///opt/shared/libfoo::libfoo",       # absolute dir
-        "file://./vendor/libbar.tar.gz::libbar",   # relative tarball
+        GitRef("ssh://git@github.com/acme/libfoo", target="libfoo", ref="v1.2.3"),
+        TarballRef("https://releases.example.com/libbar-1.0.tar.gz", target="libbar"),
+        DirectoryRef("/opt/shared/libbaz", target="libbaz"),
     ],
 )
 ```
 
-Accepted tarball suffixes: `.tar.gz`, `.tgz`, `.tar`, `.tar.xz`,
-`.tar.bz2`.
+Every ref carries the same required field — `target` — naming the target
+inside the referenced project's `build.py`.
 
-### `git+ssh://`
+## Ref types
 
-Clone over SSH. Optional `@<ref>`:
+### `GitRef`
+
+`git clone` over ssh, https, or a local `file://` path. Optional `ref=`
+selects a branch, tag, or sha after clone.
 
 ```python
-libs=[
-    "git+ssh://git@github.com/acme/libfoo@v1.2.3::libfoo",
-    "git+ssh://git@internal.corp/libbar::libbar",   # default branch
-]
+GitRef("ssh://git@github.com/acme/libfoo",   target="libfoo", ref="v1.2.3")
+GitRef("https://github.com/acme/libfoo.git", target="libfoo")
+GitRef("https://internal.corp/bar.git",      target="libbar", ref="main")
 ```
 
-Also works for `git+file://` / `git+https://` variants — the `git+`
-prefix is stripped and the rest handed to `git clone`.
+Pass the URL as `git` would understand it — **without** the `git+`
+prefix; `GitRef` adds that internally.
 
-### `http://` / `https://`
+### `TarballRef`
 
-Download a tarball and extract:
+Tarball at a local path or http(s) URL. Extracted on fetch.
 
 ```python
-libs=[
-    "https://releases.example.com/libfoo-1.2.3.tar.gz::libfoo",
-]
+TarballRef("https://example.com/libfoo-1.0.tar.gz", target="libfoo")
+TarballRef("./vendor/libbar.tar.gz",                 target="libbar")
+TarballRef("/abs/path/pkg.tar.xz",                   target="libpkg")
+```
+
+Supported suffixes: `.tar.gz`, `.tgz`, `.tar`, `.tar.xz`, `.tar.bz2`.
+Relative paths resolve against the working directory at link time —
+prefer absolute paths (e.g. `str(Path(__file__).parent / "vendor/...")`)
+when authoring a `build.py`.
+
+### `DirectoryRef`
+
+Local directory, absolute or relative:
+
+```python
+DirectoryRef("/opt/shared/libfoo", target="libfoo")
+DirectoryRef("./vendor/libbar",    target="libbar")
+```
+
+Same relative-path caveat as `TarballRef`.
+
+## includes= also accepts Refs
+
+A `Ref` pointing at a `HeadersOnly` target in an external project becomes
+`-I<staged include dir>` at compile time:
+
+```python
+ElfBinary(
+    name="app",
+    srcs=glob("src/*.c"),
+    includes=[
+        GitRef("ssh://git@github.com/acme/headers", target="PublicHeaders"),
+    ],
+)
+```
+
+The remote is fetched lazily at compile time (same cache as `libs=`),
+and the referenced target must be a `HeadersOnly` — anything else
+raises `TypeError`.
+
+## python_deps= also accepts Refs
+
+```python
+PythonShiv(
+    name="app",
+    entry="app.cli:main",
+    pyproject="app/pyproject.toml",
+    python_deps=[
+        shared_wheel,                                  # Target instance
+        "::shared",                                    # local "::name"
+        GitRef("ssh://git@github.com/acme/wheels",
+               target="libfoo", ref="v2.0.0"),
+    ],
+)
 ```
 
 ## Cache

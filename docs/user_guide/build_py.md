@@ -82,6 +82,20 @@ The build profile (`--profile Debug|Release|ReleaseSafe`) supplies its
 own flags (`-O0 -ggdb -DDEBUG` etc.) — your `flags=` list is appended on
 top. Nothing to restate per-profile.
 
+`includes=` also accepts a `HeadersOnly` target (or a `Ref` resolving to
+one) — the binary picks up `-I<staged include dir>` and the header
+target flows into `deps` so topo-sort builds it first:
+
+```python
+hdrs = HeadersOnly(name="PublicHeaders", srcs=glob("include/*.h"))
+
+ElfBinary(
+    name="app",
+    srcs=glob("src/*.c"),
+    includes=[hdrs, "third_party/foo/include"],   # target + bare dir
+)
+```
+
 ## Subclassing for team defaults
 
 If most of your binaries share a lot of flags, bake them in with a
@@ -176,14 +190,16 @@ PythonApp(
     python_deps=[shared_wheel],       # Target instance
 )
 
-# Cross-repo — remote reference (see also: Remote references)
+# Cross-repo — typed remote reference (see also: Remote references)
+from builder import GitRef
+
 PythonShiv(
     name="app",
     entry="app.cli:main",
     pyproject="app/pyproject.toml",
     python_deps=[
         "::shared",                                          # local "::name"
-        "git+ssh://git@github.com/acme/libfoo::libfoo",      # remote ref
+        GitRef("ssh://git@github.com/acme/libfoo", target="libfoo"),
     ],
 )
 ```
@@ -191,8 +207,9 @@ PythonShiv(
 At build time, `devops` builds each dep's wheel first (if not cached),
 then feeds the `dist/*.whl` into the app's venv (`pip install`) or the
 shiv `.pyz` (positional arg). `Target`-instance deps flow into
-`self.deps` for topo-sort; string refs resolve lazily at build time so
-no network traffic happens at `build.py` import.
+`self.deps` for topo-sort; `"::name"` and remote `Ref` entries resolve
+lazily at build time so no network traffic happens at `build.py`
+import.
 
 ## Documenting a target
 

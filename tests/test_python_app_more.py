@@ -55,7 +55,7 @@ def test_python_app_resolves_python_deps_to_wheel_builds(tmp_project, tmp_path):
 def test_resolve_python_dep_rejects_bare_name(tmp_project):
     _, enter = tmp_project
     with enter():
-        with pytest.raises(ValueError, match="bare names"):
+        with pytest.raises(ValueError, match="must be '::name'"):
             _resolve_python_dep("just_a_name", None)
 
 

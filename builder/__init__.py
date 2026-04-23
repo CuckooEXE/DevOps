@@ -4,6 +4,7 @@ from pathlib import Path
 
 from devops import registry
 from devops.options import COMMON_C_FLAGS, OptimizationLevel
+from devops.remote import DirectoryRef, GitRef, Ref, TarballRef
 from devops.targets.c_cpp import (
     CObjectFile,
     ElfBinary,
@@ -60,5 +61,9 @@ __all__ = [
     "Install",
     "ZigBinary",
     "ZigTest",
+    "Ref",
+    "GitRef",
+    "TarballRef",
+    "DirectoryRef",
     "glob",
 ]

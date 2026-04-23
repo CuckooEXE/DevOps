@@ -163,3 +163,118 @@ def test_resolve_sources_rejects_missing(tmp_project, tmp_path):
     with enter():
         with pytest.raises(FileNotFoundError):
             _resolve_sources(tmp_path, ["does_not_exist.c"])
+
+
+# ---- HeadersOnly / Ref in includes= -------------------------------------
+
+
+def test_headersonly_target_in_includes_adds_minusI(tmp_project, tmp_path):
+    _write(tmp_path, "include/a.h", "#pragma once\n")
+    _write(tmp_path, "main.c", "int main(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(name="hdrs", srcs=[tmp_path / "include/a.h"])
+        app = ElfBinary(name="app", srcs=[tmp_path / "main.c"], includes=[h])
+    ctx = _ctx(tmp_path)
+    flags = app._compile_flags(ctx)
+    expected = f"-I{h.output_path(ctx)}"
+    assert expected in flags
+
+
+def test_headersonly_target_flows_into_deps(tmp_project, tmp_path):
+    _write(tmp_path, "include/a.h", "#pragma once\n")
+    _write(tmp_path, "main.c", "int main(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(name="hdrs", srcs=[tmp_path / "include/a.h"])
+        app = ElfBinary(name="app", srcs=[tmp_path / "main.c"], includes=[h])
+    assert h in app.deps.values()
+
+
+def test_staticlibrary_accepts_headersonly_in_includes(tmp_project, tmp_path):
+    _write(tmp_path, "include/a.h", "#pragma once\n")
+    _write(tmp_path, "a.c", "int a(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(name="hdrs", srcs=[tmp_path / "include/a.h"])
+        lib = StaticLibrary(name="foo", srcs=[tmp_path / "a.c"], includes=[h])
+    ctx = _ctx(tmp_path)
+    assert f"-I{h.output_path(ctx)}" in lib._compile_flags(ctx)
+    assert h in lib.deps.values()
+
+
+def test_includes_mixes_paths_and_targets(tmp_project, tmp_path):
+    _write(tmp_path, "include/a.h", "#pragma once\n")
+    _write(tmp_path, "third_party/x.h", "#pragma once\n")
+    _write(tmp_path, "main.c", "int main(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(name="hdrs", srcs=[tmp_path / "include/a.h"])
+        app = ElfBinary(
+            name="app",
+            srcs=[tmp_path / "main.c"],
+            includes=["third_party", h],
+        )
+    ctx = _ctx(tmp_path)
+    flags = app._compile_flags(ctx)
+    assert f"-I{(tmp_path / 'third_party').resolve()}" in flags
+    assert f"-I{h.output_path(ctx)}" in flags
+
+
+def test_non_headersonly_target_in_includes_raises(tmp_project, tmp_path):
+    _write(tmp_path, "a.c", "int a(){return 0;}")
+    _write(tmp_path, "main.c", "int main(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        lib = StaticLibrary(name="foo", srcs=[tmp_path / "a.c"])
+        app = ElfBinary(
+            name="app", srcs=[tmp_path / "main.c"], includes=[lib]
+        )
+    with pytest.raises(TypeError, match="HeadersOnly"):
+        app._compile_flags(_ctx(tmp_path))
+
+
+def test_ref_in_includes_resolves_remote_headersonly(tmp_project, tmp_path):
+    """A DirectoryRef pointing at a remote project whose named target is
+    HeadersOnly should produce -I<staged_dir>."""
+    from devops import remote
+    from devops.remote import DirectoryRef
+
+    # Isolate the on-disk cache so this test doesn't touch ~/.cache.
+    remote.CACHE_ROOT = tmp_path / "remotes"
+    remote._reset_for_tests()
+
+    remote_proj = tmp_path / "vendor"
+    remote_proj.mkdir()
+    (remote_proj / "h.h").write_text("#pragma once\n")
+    (remote_proj / "build.py").write_text(
+        "from builder import HeadersOnly, glob\n"
+        "HeadersOnly(name='vendhdrs', srcs=glob('h.h'))\n"
+    )
+
+    _write(tmp_path, "main.c", "int main(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        app = ElfBinary(
+            name="app",
+            srcs=[tmp_path / "main.c"],
+            includes=[DirectoryRef(str(remote_proj), target="vendhdrs")],
+        )
+    ctx = _ctx(tmp_path)
+    flags = app._compile_flags(ctx)
+    # -I pointing at the remote's staged include/ dir
+    assert any(
+        f.startswith("-I") and "remote.vendor" in f and f.endswith("/include")
+        for f in flags
+    )
+
+
+def test_describe_renders_headersonly_include(tmp_project, tmp_path):
+    _write(tmp_path, "include/a.h", "#pragma once\n")
+    _write(tmp_path, "main.c", "int main(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(name="hdrs", srcs=[tmp_path / "include/a.h"])
+        app = ElfBinary(name="app", srcs=[tmp_path / "main.c"], includes=[h])
+    desc = app.describe()
+    assert h.qualified_name in desc

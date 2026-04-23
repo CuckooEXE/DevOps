@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Union
 from devops.core.command import Command
 from devops.core.target import Artifact, Project, Target
 from devops.options import OptimizationLevel
+from devops.remote import Ref
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -28,7 +29,15 @@ if TYPE_CHECKING:
 # `Sequence[str | Path]`. `list[str | Path]` here would force callers to
 # build list[str | Path] explicitly — that's the VSCode noise the user hit.
 SourcesSpec = Union[str, Path, Sequence[Union[str, Path]]]
-LibSpec = Union[str, Target]  # a Target ref, "::name", "name" (system), "git+ssh://..." (v2)
+# A Target object, "::name" (local), "name" (system lib -Llinker), or a typed
+# Ref (GitRef / TarballRef / DirectoryRef) for remote projects.
+LibSpec = Union[str, Target, Ref]
+# includes= accepts raw paths (bare dirs) plus Target / Ref entries that
+# materialize to a -I<output_dir> at compile time. Only HeadersOnly (or a
+# Ref resolving to one) is semantically valid; non-HeadersOnly targets raise
+# TypeError during _compile_flags.
+IncludeEntry = Union[str, Path, Target, Ref]
+IncludesSpec = Union[IncludeEntry, Sequence[IncludeEntry]]
 
 
 def _as_sequence(specs: SourcesSpec) -> Sequence[str | Path]:
@@ -61,6 +70,55 @@ def _resolve_sources(project_root: Path, specs: SourcesSpec | None) -> list[Path
             seen.add(p)
             paths.append(p)
     return paths
+
+
+def _include_label(inc: IncludeEntry) -> str:
+    """Render one ``includes=`` entry for ``describe()`` output."""
+    if isinstance(inc, Ref):
+        return inc.to_spec()
+    if isinstance(inc, Target):
+        return inc.qualified_name
+    return str(inc)
+
+
+def _resolve_includes(
+    project_root: Path,
+    specs: IncludesSpec | None,
+) -> list[IncludeEntry]:
+    """Normalize `includes=` entries.
+
+    Bare strings/Paths are validated + resolved against ``project_root``
+    (same rules as ``_resolve_sources``). Target and Ref entries are kept
+    as-is and materialized to a directory by ``_compile_flags`` at
+    compile time — deferring gives us a ``BuildContext`` for the
+    Target's ``output_path(ctx)`` (and for resolving remote Refs).
+    """
+    if specs is None:
+        return []
+    items: Sequence[IncludeEntry]
+    if isinstance(specs, (str, Path, Target, Ref)):
+        items = [specs]
+    else:
+        items = list(specs)
+    out: list[IncludeEntry] = []
+    seen_paths: set[Path] = set()
+    for s in items:
+        if isinstance(s, (Target, Ref)):
+            out.append(s)
+            continue
+        p = Path(s)
+        if not p.is_absolute():
+            p = (project_root / p).resolve()
+        if "*" in str(p):
+            raise ValueError(
+                f"glob pattern {s!r} cannot be used directly — wrap it in builder.glob(...)"
+            )
+        if not p.exists():
+            raise FileNotFoundError(f"include not found: {s} (looked at {p})")
+        if p not in seen_paths:
+            seen_paths.add(p)
+            out.append(p)
+    return out
 
 
 def glob_sources(
@@ -109,7 +167,7 @@ class CCompile:
 
     # Set by the combined class's __init__:
     srcs: list[Path]
-    includes: list[Path]
+    includes: list[IncludeEntry]
     flags: tuple[str, ...]
     defs: dict[str, str | None]
     undefs: tuple[str, ...]
@@ -120,6 +178,29 @@ class CCompile:
     def _profile_flags(self, profile: OptimizationLevel) -> tuple[str, ...]:
         return profile.cflags
 
+    def _include_dir(self, inc: IncludeEntry, ctx: "BuildContext") -> Path:
+        """Materialize one ``includes=`` entry to a directory for ``-I``.
+
+        Plain paths pass through; Target and Ref entries must be (or
+        resolve to) a ``HeadersOnly`` whose ``output_path(ctx)`` names
+        the staged ``include/`` directory.
+        """
+        if isinstance(inc, Ref):
+            from devops.remote import resolve_remote_ref
+
+            target: Target = resolve_remote_ref(inc)
+        elif isinstance(inc, Target):
+            target = inc
+        else:
+            return inc  # Path
+        if not isinstance(target, HeadersOnly):
+            raise TypeError(
+                f"includes= only supports HeadersOnly targets "
+                f"(or Refs resolving to one); got "
+                f"{type(target).__name__} for {inc!r}"
+            )
+        return target.output_path(ctx)
+
     def _compile_flags(self, ctx: "BuildContext") -> tuple[str, ...]:
         """Flags independent of the source being compiled.
 
@@ -128,7 +209,7 @@ class CCompile:
         out: list[str] = []
         out.extend(self._profile_flags(ctx.profile))
         for inc in self.includes:
-            out.append(f"-I{inc}")
+            out.append(f"-I{self._include_dir(inc, ctx)}")
         for k, v in self.defs.items():
             out.append(f"-D{k}" if v is None else f"-D{k}={v}")
         for k in self.undefs:
@@ -199,14 +280,18 @@ class CCompile:
         for spec in self.libs:
             if isinstance(spec, Target):
                 lib_target = spec
-            elif isinstance(spec, str) and spec.startswith("::"):
-                lib_target = registry.resolve(spec, current=self.project)
-            elif isinstance(spec, str) and "://" in spec:
-                # Remote ref: file://, git+ssh://, http(s)://
+            elif isinstance(spec, Ref):
                 from devops.remote import resolve_remote_ref
 
                 lib_target = resolve_remote_ref(spec)
+            elif isinstance(spec, str) and spec.startswith("::"):
+                lib_target = registry.resolve(spec, current=self.project)
             elif isinstance(spec, str):
+                if "://" in spec:
+                    raise TypeError(
+                        f"remote libs must use a typed Ref "
+                        f"(GitRef / TarballRef / DirectoryRef); got {spec!r}"
+                    )
                 args.append(f"-l{spec}")
                 continue
             else:
@@ -234,7 +319,7 @@ class ElfBinary(CCompile, Artifact):
         self,
         name: str,
         srcs: SourcesSpec,
-        includes: SourcesSpec | None = None,
+        includes: IncludesSpec | None = None,
         flags: tuple[str, ...] = (),
         defs: dict[str, str | None] | None = None,
         undefs: tuple[str, ...] | list[str] = (),
@@ -252,17 +337,20 @@ class ElfBinary(CCompile, Artifact):
             extra_inputs=extra_inputs,
         )
         self.srcs = _resolve_sources(self.project.root, srcs)
-        self.includes = _resolve_sources(self.project.root, includes)
+        self.includes = _resolve_includes(self.project.root, includes)
         self.flags = tuple(flags)
         self.defs = dict(defs or {})
         self.undefs = tuple(undefs)
         self.libs = tuple(libs)
         self.is_cxx = is_cxx
         self._pic = False
-        # libs that point at other Targets flow into deps so topo-sort builds them first
+        # Targets in libs= / includes= flow into deps so topo-sort builds them first
         for spec in self.libs:
             if isinstance(spec, Target):
                 self.deps[f"_lib_{spec.name}"] = spec
+        for inc in self.includes:
+            if isinstance(inc, Target):
+                self.deps[f"_inc_{inc.name}"] = inc
         if tests is not None:
             from devops.targets.tests import GoogleTest
 
@@ -296,14 +384,20 @@ class ElfBinary(CCompile, Artifact):
 
     def describe(self) -> str:
         src_list = ", ".join(s.name for s in self.srcs)
-        lib_list = ", ".join(
-            spec if isinstance(spec, str) else spec.qualified_name
-            for spec in self.libs
-        ) or "-"
+
+        def _lib_label(spec: object) -> str:
+            if isinstance(spec, str):
+                return spec
+            if isinstance(spec, Ref):
+                return spec.to_spec()
+            return spec.qualified_name  # type: ignore[attr-defined]
+
+        lib_list = ", ".join(_lib_label(s) for s in self.libs) or "-"
+        inc_list = ", ".join(_include_label(inc) for inc in self.includes) or "-"
         return (
             f"{type(self).__name__} {self.qualified_name} ({self.arch})\n"
             f"  srcs:     {src_list}\n"
-            f"  includes: {', '.join(str(p) for p in self.includes) or '-'}\n"
+            f"  includes: {inc_list}\n"
             f"  libs:     {lib_list}\n"
             f"  flags:    {' '.join(self.flags) or '-'}"
         )
@@ -341,7 +435,7 @@ class StaticLibrary(CCompile, Artifact):
         self,
         name: str,
         srcs: SourcesSpec,
-        includes: SourcesSpec | None = None,
+        includes: IncludesSpec | None = None,
         flags: tuple[str, ...] = (),
         defs: dict[str, str | None] | None = None,
         undefs: tuple[str, ...] | list[str] = (),
@@ -357,13 +451,16 @@ class StaticLibrary(CCompile, Artifact):
             extra_inputs=extra_inputs,
         )
         self.srcs = _resolve_sources(self.project.root, srcs)
-        self.includes = _resolve_sources(self.project.root, includes)
+        self.includes = _resolve_includes(self.project.root, includes)
         self.flags = tuple(flags)
         self.defs = dict(defs or {})
         self.undefs = tuple(undefs)
         self.libs = ()
         self.is_cxx = is_cxx
         self._pic = False
+        for inc in self.includes:
+            if isinstance(inc, Target):
+                self.deps[f"_inc_{inc.name}"] = inc
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / f"lib{self.name}.a"
@@ -395,7 +492,8 @@ class StaticLibrary(CCompile, Artifact):
         return (
             f"StaticLibrary {self.qualified_name}\n"
             f"  srcs:     {', '.join(s.name for s in self.srcs)}\n"
-            f"  includes: {', '.join(str(p) for p in self.includes) or '-'}"
+            f"  includes: "
+            f"{', '.join(_include_label(inc) for inc in self.includes) or '-'}"
         )
 
 
@@ -420,7 +518,7 @@ class CObjectFile(CCompile, Artifact):
         self,
         name: str,
         srcs: SourcesSpec,
-        includes: SourcesSpec | None = None,
+        includes: IncludesSpec | None = None,
         flags: tuple[str, ...] = (),
         defs: dict[str, str | None] | None = None,
         undefs: tuple[str, ...] | list[str] = (),
@@ -437,13 +535,16 @@ class CObjectFile(CCompile, Artifact):
             extra_inputs=extra_inputs,
         )
         self.srcs = _resolve_sources(self.project.root, srcs)
-        self.includes = _resolve_sources(self.project.root, includes)
+        self.includes = _resolve_includes(self.project.root, includes)
         self.flags = tuple(flags)
         self.defs = dict(defs or {})
         self.undefs = tuple(undefs)
         self.libs = ()
         self.is_cxx = is_cxx
         self._pic = pic
+        for inc in self.includes:
+            if isinstance(inc, Target):
+                self.deps[f"_inc_{inc.name}"] = inc
 
     def output_path(self, ctx: "BuildContext") -> Path:
         # Directory containing the produced .o files.
@@ -468,7 +569,8 @@ class CObjectFile(CCompile, Artifact):
         return (
             f"CObjectFile {self.qualified_name} ({self.arch})\n"
             f"  srcs:     {', '.join(s.name for s in self.srcs)}\n"
-            f"  includes: {', '.join(str(p) for p in self.includes) or '-'}"
+            f"  includes: "
+            f"{', '.join(_include_label(inc) for inc in self.includes) or '-'}"
         )
 
 
