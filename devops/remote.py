@@ -45,9 +45,12 @@ if TYPE_CHECKING:
 CACHE_ROOT = Path.home() / ".cache" / "devops" / "remotes"
 
 
-# In-process cache: url -> project_name, so repeated references to the same
-# remote during a single CLI invocation don't re-import the build.py.
-_resolved: dict[str, str] = {}
+# In-process cache: (url, build_override) -> project_name, so repeated
+# references to the same remote during a single CLI invocation don't
+# re-import the build.py. The override is part of the key so two Refs
+# that share a source URL but apply different recipes register as two
+# distinct projects instead of clobbering each other.
+_resolved: dict[tuple[str, str | None], str] = {}
 
 
 # ----- typed references ---------------------------------------------------
@@ -62,9 +65,12 @@ class Ref:
     """Base class for remote refs. Subclasses carry their own fields."""
 
     target: str
-
-    def to_spec(self) -> str:
-        raise NotImplementedError
+    # Optional local build.py to apply to the fetched source instead of
+    # the source's own build.py. Useful when depending on an external
+    # project that wasn't built with devops — vendor a recipe and point
+    # `build=` at it. Relative paths resolve against cwd at resolution
+    # time; prefer absolute (e.g. ``str(Path(__file__).parent / "..."))``.
+    build: str | Path | None
 
 
 @dataclass(frozen=True)
@@ -74,12 +80,14 @@ class GitRef(Ref):
     ``url`` is passed to ``git clone`` after prefixing with ``git+`` — supply
     the bare URL without ``git+`` (e.g. ``ssh://git@github.com/acme/libfoo``
     or ``https://github.com/acme/libfoo.git``). ``ref`` optionally selects
-    a branch/tag/sha after clone.
+    a branch/tag/sha after clone. ``build`` optionally overrides the
+    fetched project's build.py with a local recipe file.
     """
 
     url: str
     target: str
     ref: str | None = None
+    build: str | Path | None = None
 
     def to_spec(self) -> str:
         url = f"{self.url}@{self.ref}" if self.ref is not None else self.url
@@ -92,11 +100,13 @@ class TarballRef(Ref):
 
     Local paths (absolute or relative to cwd) are rewritten to ``file://``.
     Supported suffixes: ``.tar.gz``, ``.tgz``, ``.tar``, ``.tar.xz``,
-    ``.tar.bz2``.
+    ``.tar.bz2``. ``build`` optionally overrides the extracted project's
+    build.py with a local recipe file.
     """
 
     url: str
     target: str
+    build: str | Path | None = None
 
     def to_spec(self) -> str:
         if "://" in self.url:
@@ -112,11 +122,13 @@ class DirectoryRef(Ref):
     """Local directory reference — absolute or relative path.
 
     Relative paths resolve against the current working directory at
-    resolution time.
+    resolution time. ``build`` optionally overrides the referenced
+    project's build.py with a local recipe file.
     """
 
     path: str
     target: str
+    build: str | Path | None = None
 
     def to_spec(self) -> str:
         p = Path(self.path)
@@ -137,12 +149,22 @@ def resolve_remote_ref(ref: Ref) -> "Target":
     spec = ref.to_spec()
     url, target_name = spec.rsplit("::", 1)
 
-    if url in _resolved:
-        project_name = _resolved[url]
+    build_override: Path | None = None
+    if ref.build is not None:
+        bp = Path(ref.build)
+        if not bp.is_absolute():
+            bp = (Path.cwd() / bp).resolve()
+        build_override = bp
+
+    cache_key = (url, str(build_override) if build_override else None)
+    if cache_key in _resolved:
+        project_name = _resolved[cache_key]
     else:
         local_dir = _fetch(url)
-        project_name = _register_remote_project(url, local_dir)
-        _resolved[url] = project_name
+        project_name = _register_remote_project(
+            url, local_dir, build_override=build_override
+        )
+        _resolved[cache_key] = project_name
 
     return registry.resolve(f"{project_name}::{target_name}")
 
@@ -171,15 +193,29 @@ def _project_name_for(url: str, key: str) -> str:
     return f"remote.{safe}"
 
 
-def _register_remote_project(url: str, local_dir: Path) -> str:
+def _register_remote_project(
+    url: str,
+    local_dir: Path,
+    build_override: Path | None = None,
+) -> str:
     from devops.core.target import Project
     from devops.workspace import _load_build_py
 
     key = _cache_key(url)
     project_name = _project_name_for(url, key)
+    if build_override is not None:
+        # Distinguish same URL + different recipe so registrations don't
+        # collide. Suffix is short but stable per-recipe.
+        recipe_key = hashlib.sha1(str(build_override).encode()).hexdigest()[:8]
+        project_name = f"{project_name}.{recipe_key}"
+
     proj = Project(name=project_name, root=local_dir.resolve())
-    build_py = local_dir / "build.py"
+    build_py = build_override if build_override is not None else local_dir / "build.py"
     if not build_py.is_file():
+        if build_override is not None:
+            raise FileNotFoundError(
+                f"remote {url!r}: build= recipe not found at {build_py}"
+            )
         raise FileNotFoundError(
             f"remote {url!r}: expected build.py at {build_py}"
         )

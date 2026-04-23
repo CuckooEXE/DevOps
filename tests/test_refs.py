@@ -284,3 +284,132 @@ def test_project_name_derived_from_path():
 
 def test_project_name_strips_git_suffix():
     assert remote._project_name_for("git+ssh://host/org/repo.git", "k") == "remote.repo"
+
+
+# ---- build= override (local recipe for a source-only remote) -----------
+
+
+def _seed_source_only(root: Path) -> None:
+    """Remote source without a build.py — needs an external recipe."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "lib.c").write_text("int remotelib_f(){return 42;}\n")
+
+
+def _write_recipe(path: Path, libname: str = "recipedLib") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "from builder import ElfSharedObject, glob\n"
+        f"ElfSharedObject(name={libname!r}, srcs=glob('lib.c'))\n"
+    )
+
+
+def test_directoryref_build_override_loads_local_recipe(tmp_path):
+    src = tmp_path / "src"
+    _seed_source_only(src)
+    recipe = tmp_path / "recipes" / "mylib.build.py"
+    _write_recipe(recipe, libname="recipedLib")
+    t = remote.resolve_remote_ref(
+        DirectoryRef(str(src), target="recipedLib", build=str(recipe))
+    )
+    assert isinstance(t, ElfSharedObject)
+    assert t.name == "recipedLib"
+
+
+def test_tarballref_build_override_loads_local_recipe(tmp_path):
+    src = tmp_path / "src"
+    _seed_source_only(src)
+    tarball = tmp_path / "src.tar.gz"
+    with tarfile.open(tarball, "w:gz") as tf:
+        tf.add(src, arcname="src")
+    recipe = tmp_path / "recipes" / "mylib.build.py"
+    _write_recipe(recipe, libname="recipedLib")
+    t = remote.resolve_remote_ref(
+        TarballRef(str(tarball), target="recipedLib", build=str(recipe))
+    )
+    assert t.name == "recipedLib"
+
+
+def test_gitref_build_override_loads_local_recipe(tmp_path):
+    work = tmp_path / "work"
+    _seed_source_only(work)
+    subprocess.run(["git", "-C", str(work), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(work), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "-m", "seed"],
+        check=True,
+    )
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+    recipe = tmp_path / "recipes" / "mylib.build.py"
+    _write_recipe(recipe, libname="recipedLib")
+
+    t = remote.resolve_remote_ref(
+        GitRef(f"file://{bare}", target="recipedLib", build=str(recipe))
+    )
+    assert t.name == "recipedLib"
+
+
+def test_missing_build_override_raises(tmp_path):
+    src = tmp_path / "src"
+    _seed_source_only(src)
+    with pytest.raises(FileNotFoundError, match="recipe not found"):
+        remote.resolve_remote_ref(
+            DirectoryRef(
+                str(src), target="x", build=str(tmp_path / "nope.build.py")
+            )
+        )
+
+
+def test_same_url_different_build_register_distinctly(tmp_path):
+    """Two Refs sharing a URL but with different recipes must not clobber."""
+    src = tmp_path / "src"
+    _seed_source_only(src)
+    recipe_a = tmp_path / "recipes" / "a.build.py"
+    recipe_b = tmp_path / "recipes" / "b.build.py"
+    _write_recipe(recipe_a, libname="libA")
+    _write_recipe(recipe_b, libname="libB")
+
+    ta = remote.resolve_remote_ref(
+        DirectoryRef(str(src), target="libA", build=str(recipe_a))
+    )
+    tb = remote.resolve_remote_ref(
+        DirectoryRef(str(src), target="libB", build=str(recipe_b))
+    )
+    assert ta.name == "libA"
+    assert tb.name == "libB"
+    assert ta.project.name != tb.project.name
+
+
+def test_build_override_relative_path_resolves_from_cwd(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _seed_source_only(src)
+    recipe = tmp_path / "recipes" / "mylib.build.py"
+    _write_recipe(recipe, libname="recipedLib")
+
+    monkeypatch.chdir(tmp_path)
+    t = remote.resolve_remote_ref(
+        DirectoryRef(
+            str(src), target="recipedLib", build="recipes/mylib.build.py"
+        )
+    )
+    assert t.name == "recipedLib"
+
+
+def test_recipe_glob_resolves_against_fetched_source(tmp_path):
+    """A recipe's glob() must see the fetched source as the project root."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.c").write_text("int a(){return 1;}")
+    (src / "b.c").write_text("int b(){return 2;}")
+    recipe = tmp_path / "recipe.build.py"
+    recipe.write_text(
+        "from builder import ElfSharedObject, glob\n"
+        "ElfSharedObject(name='bundled', srcs=glob('*.c'))\n"
+    )
+    t = remote.resolve_remote_ref(
+        DirectoryRef(str(src), target="bundled", build=str(recipe))
+    )
+    assert isinstance(t, ElfSharedObject)
+    # Both .c files discovered from the fetched source, not recipe's dir
+    assert len(t.srcs) == 2

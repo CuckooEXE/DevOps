@@ -63,6 +63,43 @@ DirectoryRef("./vendor/libbar",    target="libbar")
 
 Same relative-path caveat as `TarballRef`.
 
+## Providing a build recipe for a non-devops project
+
+If the external project doesn't ship a `build.py` (OpenSSL, zlib, most
+vendor libraries), point `build=` at a local recipe file. The fetched
+source becomes the recipe's project root, so `glob(...)` inside the
+recipe resolves against the cloned/extracted tree:
+
+```python
+# recipes/openssl.build.py
+from builder import StaticLibrary, glob
+
+StaticLibrary(
+    name="openssl",
+    srcs=glob("ssl/*.c") + glob("crypto/*.c"),
+    includes=["include"],
+)
+```
+
+```python
+# your build.py
+from pathlib import Path
+
+libs=[
+    GitRef(
+        "ssh://git@github.com/openssl/openssl.git",
+        target="openssl",
+        ref="openssl-3.0",
+        # absolute path — `build=` is cwd-relative when a plain string
+        build=str(Path(__file__).parent / "recipes" / "openssl.build.py"),
+    ),
+]
+```
+
+Two refs that share a URL but apply different recipes register as two
+distinct projects (e.g. `remote.openssl.<hash>::openssl`) so they don't
+collide in the cache.
+
 ## includes= also accepts Refs
 
 A `Ref` pointing at a `HeadersOnly` target in an external project becomes
