@@ -6,3 +6,37 @@
 #         "-v", "{workspace}:{workspace}", "-w", "{cwd}",
 #         "ghcr.io/team/toolchain:v3", "clang"]
 #
+
+# Everything the fixture's targets need, in one place.
+# Run `devops bootstrap` on a fresh box (or in a Dockerfile) to install.
+[bootstrap]
+apt = [
+    "clang",
+    "clang-format",
+    "clang-tidy",
+    "cppcheck",
+    "libgtest-dev",
+    "binutils",                # size / strip / objcopy (used by CustomArtifacts)
+    "python3-pip",
+    "build-essential",
+]
+pip = [
+    "build",
+    "shiv",
+    "sphinx",
+    "furo",
+    "myst-parser",
+    "ruff",
+    "black",
+    "pytest",
+    "pytest-cov",
+    "typer",
+]
+pip_args = ["--user", "--break-system-packages"]
+
+# Zig isn't in Debian — pull the pinned release directly. `run` entries are
+# verbatim shell commands; keep them short or move to a tools/ script.
+run = [
+    "curl -sSL https://ziglang.org/download/0.15.1/zig-linux-x86_64-0.15.1.tar.xz | sudo tar xJ -C /opt/",
+    "sudo ln -sf /opt/zig-linux-x86_64-0.15.1/zig /usr/local/bin/zig",
+]

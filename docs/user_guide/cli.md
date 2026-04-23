@@ -66,6 +66,19 @@ Missing tools surface as a single typed failure per target rather than a
 crash, so a clean `devops lint` locally doesn't require every team
 member to have every tool installed.
 
+## `devops bootstrap [--verbose] [--dry-run]`
+
+Install tools declared in `devops.toml`'s `[bootstrap]` section — the
+companion to `doctor`, for fresh VMs / CI runners / Dockerfile layers.
+Runs `apt` → `pip` → `run` (verbatim shell). See {doc}`bootstrap` for
+the schema.
+
+```bash
+devops bootstrap             # install everything
+devops bootstrap --dry-run   # print what would run
+devops bootstrap -v          # verbose summary of each list
+```
+
 ## `devops doctor [--profile ...] [--verbose]`
 
 Pre-flight check: walks every registered target, unions declared
@@ -79,9 +92,11 @@ devops doctor -v          # per-tool report, including who needs it
 ```
 
 Run this **before** `devops build` in CI — a missing tool fails at
-pre-flight instead of mid-compile. For `CustomArtifact` / `Script`
-targets whose commands are shell strings, declare the tools they need
-via `required_tools=[...]` so they show up here.
+pre-flight instead of mid-compile. When `[bootstrap]` is defined, the
+error output suggests `devops bootstrap` as the fix. For
+`CustomArtifact` / `Script` targets whose commands are shell strings,
+declare the tools they need via `required_tools=[...]` so they show up
+here.
 
 ## `devops install [names...] [--profile ...]`
 

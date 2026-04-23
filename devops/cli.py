@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from devops import bootstrap as bootstrap_mod
 from devops import graph, registry
 from devops.context import BuildContext, load_toolchains
 from devops.core import runner
@@ -337,6 +338,48 @@ def install_cmd(
 
 
 @app.command()
+def bootstrap(
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Install tools declared in devops.toml's [bootstrap] section.
+
+    Runs apt → pip → run in order. Idempotent in the common case (apt-get
+    install skips already-installed packages, pip re-resolves cheaply).
+
+    Run this on a fresh VM / in CI / inside a Dockerfile:
+
+        devops bootstrap && devops doctor && devops build <name>
+    """
+    root = find_workspace_root(Path.cwd())
+    cfg = bootstrap_mod.load_bootstrap(root)
+
+    if cfg.is_empty:
+        typer.echo("no [bootstrap] section in devops.toml (or it's empty) — nothing to do")
+        return
+
+    cmds = bootstrap_mod.bootstrap_commands(cfg, cwd=root)
+    if verbose:
+        typer.echo(f"[bootstrap] {len(cmds)} step(s) from {cfg._source}")
+        if cfg.apt:
+            typer.echo(f"  apt ({len(cfg.apt)}): {' '.join(cfg.apt)}")
+        if cfg.pip:
+            typer.echo(f"  pip ({len(cfg.pip)}): {' '.join(cfg.pip)}  [args: {' '.join(cfg.pip_args)}]")
+        if cfg.run:
+            typer.echo(f"  run ({len(cfg.run)}): {cfg.run[0]!r}…")
+
+    try:
+        runner.run_all(cmds, verbose=verbose, dry_run=dry_run, use_cache=False)
+    except runner.ToolMissing as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(2)
+    except runner.CommandFailed as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(e.returncode)
+    typer.echo("bootstrap ok")
+
+
+@app.command()
 def doctor(
     profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -384,7 +427,16 @@ def doctor(
             consumers = ", ".join(sorted(set(needed[tool])))
             typer.echo(f"  {tool}  ({consumers})", err=True)
         typer.echo("", err=True)
-        typer.echo("Install them (apt / pip / vendor download) or wrap them via [toolchain] in devops.toml.", err=True)
+        # If [bootstrap] is defined, nudge the user toward it.
+        cfg = bootstrap_mod.load_bootstrap(ctx.workspace_root)
+        if not cfg.is_empty:
+            typer.echo("Try: devops bootstrap", err=True)
+        else:
+            typer.echo(
+                "Install them (apt / pip / vendor download), add a [bootstrap] "
+                "section to devops.toml, or wrap them via [toolchain].",
+                err=True,
+            )
         raise typer.Exit(1)
 
     typer.echo(f"doctor ok — {len(needed)} tool(s) present")

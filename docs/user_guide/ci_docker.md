@@ -28,36 +28,31 @@ ENTRYPOINT ["devops"]
 
 ## Per-project image
 
-Sits on top of the base, adds this project's tools, and validates with
-`devops doctor` at image-build time — the image refuses to build if
-`devops.toml`/`build.py` reference anything not installed:
+Sits on top of the base and defers to `[bootstrap]` in `devops.toml` for
+the actual install list. The image build fails (not CI) if `devops
+doctor` finds any target referencing an uninstalled tool:
 
 ```dockerfile
 # ProjectA/Dockerfile
 FROM yourorg/devops-base:v1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      clang-19 clang-tidy-19 clang-format-19 cppcheck \
-      libgtest-dev \
-    && rm -rf /var/lib/apt/lists/* \
- && ln -sf /usr/bin/clang-19 /usr/local/bin/clang \
- && ln -sf /usr/bin/clang++-19 /usr/local/bin/clang++ \
- && ln -sf /usr/bin/clang-tidy-19 /usr/local/bin/clang-tidy \
- && ln -sf /usr/bin/clang-format-19 /usr/local/bin/clang-format
+# Copy the config first so the bootstrap layer is cached aggressively —
+# only invalidates when tool requirements change, not on every src edit.
+COPY devops.toml ./
+RUN devops bootstrap
 
-RUN pip install --break-system-packages --no-cache-dir \
-      ruff black shiv sphinx furo build pytest typer
-
-# Vendor SDK — anything apt/pip can't handle
-COPY ci/vendor-sdk.tar.gz /tmp/
-RUN tar xz -f /tmp/vendor-sdk.tar.gz -C /opt/ && rm /tmp/vendor-sdk.tar.gz
-
-# Image-build-time sanity gate: fails if any target needs a tool we
-# haven't installed. Copy only what doctor needs (toml + build files +
-# sources referenced by glob()s).
-COPY devops.toml build.py ./
+# Now validate against the target graph. `build.py` references globs
+# that may want sources, but doctor only needs the top-level graph —
+# copy just what's needed so image rebuilds stay fast.
+COPY build.py ./
 RUN devops doctor
 ```
+
+The project's tool list lives in `devops.toml` under `[bootstrap]` (see
+{doc}`bootstrap`). Adding a new `CustomArtifact` that needs a tool?
+Update `devops.toml`, bump the image tag, CI picks up the new image on
+next run. **The `devops.toml` is the single source of truth** —
+Dockerfile is just a thin wrapper.
 
 Build and tag:
 
@@ -114,8 +109,17 @@ Result: "image built" is a stronger guarantee than "CI passed before"
 
 ## When you don't want Docker
 
-For cloud VMs / local laptops, lean on the shared base image too:
-`pip install` the framework, then run `apt-get install` manually for
-the tools `devops doctor` reports as missing. The doctor's output is
-designed to be readable and list-shaped so you can feed it straight
-into an apt command.
+For cloud VMs / local laptops, the same `[bootstrap]` section drives
+install directly on the host:
+
+```bash
+# on a fresh cloud VM / dev laptop
+pip install --user git+https://github.com/yourorg/devops.git@v1
+git clone https://github.com/yourorg/projectA.git
+cd projectA
+devops bootstrap            # reads [bootstrap] from devops.toml, installs everything
+devops doctor               # sanity gate
+devops build MyCoolApp
+```
+
+Same two commands as the Dockerfile, same source of truth.
