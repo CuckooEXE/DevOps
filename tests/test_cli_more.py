@@ -110,7 +110,6 @@ def test_install_with_no_targets_errors(tmp_path, monkeypatch):
 def test_install_runs_install_target(tmp_path, monkeypatch):
     ws = _make_ws(tmp_path)
     monkeypatch.chdir(ws)
-    import shutil
     (ws / "dst").mkdir()
     # Point the install dest at a writable tmp dir (override via fresh build.py)
     (ws / "build.py").write_text(

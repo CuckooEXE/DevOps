@@ -7,7 +7,6 @@ bottom. Everything else is pure logic tested on synthetic inputs.
 
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 

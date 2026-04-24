@@ -21,8 +21,8 @@ def test_python_wheel_lint_emits_black_and_ruff(tmp_project, tmp_path):
         wheel = PythonWheel(name="x", srcs=[tmp_path / "mod.py"])
     cmds = wheel.lint_cmds(_ctx(tmp_path))
     labels = [c.label for c in cmds]
-    assert any("black" in l for l in labels)
-    assert any("ruff" in l for l in labels)
+    assert any("black" in lbl for lbl in labels)
+    assert any("ruff" in lbl for lbl in labels)
 
 
 def test_python_wheel_lint_falls_back_to_project_root_when_no_srcs(tmp_project, tmp_path):

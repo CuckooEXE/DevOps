@@ -7,7 +7,6 @@ import os
 import time
 from pathlib import Path
 
-import pytest
 
 from devops.context import BuildContext
 from devops.options import OptimizationLevel

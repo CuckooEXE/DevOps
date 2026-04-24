@@ -89,8 +89,8 @@ def test_install_headers_issues_mkdir_and_cp(tmp_project, tmp_path):
         inst = Install(name="i", artifact=h, dest="/opt/include")
     cmds = inst.install_cmds(_ctx(tmp_path))
     labels = [c.label for c in cmds]
-    assert any("mkdir" in l for l in labels)
-    assert any("install headers" in l for l in labels)
+    assert any("mkdir" in lbl for lbl in labels)
+    assert any("install headers" in lbl for lbl in labels)
 
 
 def test_install_sudo_prefixes_install(tmp_project, tmp_path):

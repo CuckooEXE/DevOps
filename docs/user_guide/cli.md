@@ -31,15 +31,23 @@ devops build MyCoolApp -v
 Profiles: `Debug` (default, `-O0 -ggdb`), `Release` (`-O2 -DNDEBUG`),
 `ReleaseSafe` (`-O2 -ggdb -D_FORTIFY_SOURCE=2 -fstack-protector-strong`).
 
-## `devops run <name> [--dry-run]`
+## `devops run <spec> [args...] [--dry-run]`
 
 Execute an artifact's binary, or run a Script. Script deps build first.
 
 ```bash
-devops run MyCoolApp           # exec the binary
-devops run pushToProd          # run a Script
-devops run pushToProd --dry-run   # print the cmds, don't run
+devops run MyCoolApp                  # exec the binary
+devops run MyCoolApp -- --verbose x   # args after `--` forwarded to the binary
+devops run pushToProd                 # run a Script
+devops run pushToProd --dry-run       # print the cmds, don't run
 ```
+
+`<spec>` may also be a **remote-ref spec** (`git+ssh://host/repo[@ref]::Target`,
+`https://host/x.tar.gz::Target`, `/abs/path::Target`, `./rel::Target`) —
+devops fetches/clones the source, imports its `build.py`, builds the
+target transitively, and execs from your current cwd. The same remote
+form is accepted by `devops build` and `devops describe`. See
+{doc}`remote_run` for the full grammar.
 
 Libraries (`ElfSharedObject`, `StaticLibrary`, `HeadersOnly`) are not
 runnable and raise an error.
@@ -118,6 +126,35 @@ Tests inherit their target's compile environment for C/C++, or set
 Print the artifact's version. Falls back through:
 `version="..."` kwarg → project's `VERSION` file → `git describe --tags
 --always --dirty` → `"0.0.0-unknown"`.
+
+## `devops graph [names...] [--format=dot|json|text] [--output=path] [--resolve-remotes]`
+
+Export the dependency DAG. With no names, dumps the whole workspace;
+with names, dumps the forward-transitive subgraph rooted there. Remote
+refs are opaque by default — pass `--resolve-remotes` to fetch and
+inline them. Full reference: {doc}`graph`.
+
+```bash
+devops graph                          # stdout, dot format
+devops graph | dot -Tsvg > g.svg
+devops graph MyCoolApp --format=json  # machine-readable
+```
+
+## `devops watch [names...] [--debounce-ms=...] [--clear-screen] [--poll]`
+
+Build once, then rebuild affected targets on file change. Walks every
+Command input plus headers discovered from depfiles and extends the
+affected set through `Target.deps` so consumers rebuild automatically.
+`build.py` / `devops.toml` edits trigger an in-process re-discovery.
+Watchdog is an optional dep (install via `pip install
+'devops-builder[watch]'`); without it, a polling fallback kicks in.
+Full reference: {doc}`watch`.
+
+```bash
+devops watch                          # watch every Artifact
+devops watch MyCoolApp                # only rebuild one target + its consumers
+devops watch --poll                   # force mtime polling
+```
 
 ## `devops clean [names...]`
 

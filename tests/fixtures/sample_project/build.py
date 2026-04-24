@@ -288,3 +288,18 @@ CustomArtifact(
     required_tools=["size"],
     doc="Runs `size` on MyCoolApp and captures the per-section byte counts.",
 )
+
+
+# ---------------------------------------------------------------------------
+# Cross-compile example — illustrative only, requires `[toolchain.aarch64]`
+# in devops.toml and an ARM64 compiler on the host. Uncomment to exercise
+# the arch= kwarg (see docs/user_guide/cross_compile.md):
+#
+# ElfBinary(
+#     name="MyCoolAppArm64",
+#     srcs=glob(["main.c", "src/*.c"], exclude=["src/lib.c"]),
+#     includes=[headers],
+#     arch="aarch64",
+#     doc="Same binary as MyCoolApp but for aarch64; exercises cross-compile.",
+# )
+# ---------------------------------------------------------------------------

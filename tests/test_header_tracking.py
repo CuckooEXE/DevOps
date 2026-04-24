@@ -8,7 +8,6 @@ from pathlib import Path
 
 from devops import cache
 from devops.core import runner
-from devops.core.command import Command
 from devops.context import BuildContext
 from devops.options import OptimizationLevel
 from devops.targets.c_cpp import ElfBinary, StaticLibrary

@@ -4,7 +4,6 @@ multi-input / multi-output / multi-cmd shapes."""
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 from pathlib import Path
 
@@ -186,7 +185,7 @@ def test_path_input_change_invalidates(tmp_project, tmp_path):
 
 def test_custom_runs_a_real_shell_pipeline(tmp_project, tmp_path):
     _, enter = tmp_project
-    src = _write(tmp_path, "msg.txt", "hello\n")
+    _write(tmp_path, "msg.txt", "hello\n")
     with enter():
         ca = CustomArtifact(
             name="upper",
