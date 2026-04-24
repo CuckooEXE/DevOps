@@ -51,4 +51,5 @@ developer_guide/architecture
 developer_guide/adding_a_target_type
 developer_guide/adding_a_tool
 developer_guide/testing_the_framework
+developer_guide/writing_a_plugin
 ```

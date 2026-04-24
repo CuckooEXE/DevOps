@@ -68,3 +68,29 @@ __all__ = [
     "DirectoryRef",
     "glob",
 ]
+
+
+# Plugin injection: any Target class a devops.targets entry point
+# registered becomes importable as `from builder import FooBinary`. A
+# plugin that collides with a built-in name is skipped with a warning.
+def _inject_plugin_classes() -> None:
+    from devops import plugins
+
+    globs = globals()
+    for plugin in plugins.load_plugins():
+        for cls in plugin.classes:
+            name = cls.__name__
+            if name in globs:
+                import sys
+
+                print(
+                    f"devops: plugin {plugin.name!r} tried to register {name!r} "
+                    f"— name already bound; skipping",
+                    file=sys.stderr,
+                )
+                continue
+            globs[name] = cls
+            __all__.append(name)
+
+
+_inject_plugin_classes()

@@ -495,6 +495,14 @@ def doctor(
             status = "MISSING" if tool in missing else "ok"
             consumers = ", ".join(sorted(set(needed[tool])))
             typer.echo(f"  [{status:>7}] {tool:<30} — {consumers}")
+        from devops.plugins import load_plugins
+
+        loaded = load_plugins()
+        if loaded:
+            typer.echo(f"loaded plugins ({len(loaded)}):")
+            for p in loaded:
+                cls_names = ", ".join(c.__name__ for c in p.classes) or "-"
+                typer.echo(f"  {p.name}  api={p.min_api_version}  classes=[{cls_names}]")
 
     if missing:
         typer.echo("", err=True)

@@ -97,14 +97,31 @@ class Toolchain:
     zig: Tool = field(default_factory=lambda: Tool.of("zig"))
     shiv: Tool = field(default_factory=lambda: Tool.of("shiv"))
     testrange: Tool = field(default_factory=lambda: Tool.of("testrange"))
+    # Free-form namespace populated by plugins and/or [toolchain.extras]
+    # in devops.toml. Plugin Targets read tools via
+    # ``ctx.toolchain_for(self.arch).extras["cargo"]``.
+    extras: dict[str, Tool] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, cfg: dict[str, object] | None) -> "Toolchain":
         tc = cls()
         if not cfg:
             return tc
-        known = {f.name for f in fields(cls)}
+        known = {f.name for f in fields(cls)} - {"extras"}
         for key, spec in cfg.items():
+            if key == "extras":
+                if not isinstance(spec, dict):
+                    raise TypeError(
+                        f"toolchain.extras must be a table, got {type(spec).__name__}"
+                    )
+                for name, sub_spec in spec.items():
+                    if not isinstance(sub_spec, (str, list, tuple, Tool)):
+                        raise TypeError(
+                            f"toolchain.extras[{name}] must be str/list/tuple/Tool, "
+                            f"got {type(sub_spec).__name__}"
+                        )
+                    tc.extras[name] = Tool.of(sub_spec)
+                continue
             if key not in known:
                 raise ValueError(f"unknown toolchain entry {key!r}; known: {sorted(known)}")
             if not isinstance(spec, (str, list, tuple, Tool)):
@@ -126,22 +143,32 @@ def load_toolchains(workspace_root: Path) -> dict[str, Toolchain]:
     """
     result: dict[str, Toolchain] = {HOST_ARCH: Toolchain()}
     cfg_path = workspace_root / "devops.toml"
-    if not cfg_path.is_file():
-        return result
-    with cfg_path.open("rb") as f:
-        data = tomllib.load(f)
-    tc_section = data.get("toolchain")
-    if not tc_section:
-        return result
-    host_entries: dict[str, object] = {}
-    for key, value in tc_section.items():
-        if isinstance(value, dict):
-            # sub-table → a per-arch toolchain
-            result[key] = Toolchain.from_config(value)
-        else:
-            host_entries[key] = value
-    if host_entries:
-        result[HOST_ARCH] = Toolchain.from_config(host_entries)
+    if cfg_path.is_file():
+        with cfg_path.open("rb") as f:
+            data = tomllib.load(f)
+        tc_section = data.get("toolchain") or {}
+        host_entries: dict[str, object] = {}
+        for key, value in tc_section.items():
+            if key == "extras":
+                # Reserved sub-table: host toolchain's plugin-tool extras.
+                host_entries["extras"] = value
+            elif isinstance(value, dict):
+                # sub-table → a per-arch toolchain
+                result[key] = Toolchain.from_config(value)
+            else:
+                host_entries[key] = value
+        if host_entries:
+            result[HOST_ARCH] = Toolchain.from_config(host_entries)
+
+    # Merge plugin-declared defaults into every Toolchain's extras
+    # (user-provided entries already win — we never overwrite existing
+    # keys the user set in their devops.toml).
+    from devops.api import DEFAULT_TOOLCHAIN_EXTRAS
+
+    for tc in result.values():
+        for name, tool in DEFAULT_TOOLCHAIN_EXTRAS.items():
+            tc.extras.setdefault(name, tool)
+
     return result
 
 
