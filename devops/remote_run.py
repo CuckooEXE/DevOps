@@ -47,7 +47,7 @@ def parse_spec(s: str) -> Ref | None:
     if "::" not in s:
         return None
     url_part, target = s.rsplit("::", 1)
-    if not target:
+    if not target or not url_part:
         return None
 
     if url_part.startswith("git+"):
@@ -55,7 +55,13 @@ def parse_spec(s: str) -> Ref | None:
         from devops.remote import _split_git_ref
 
         git_url = url_part[len("git+"):]
+        if not git_url:
+            return None
         bare, ref = _split_git_ref(git_url)
+        # Reject malformed specs: an empty URL, a pure `@ref` with no host,
+        # or anything that doesn't look like at least a scheme or a path.
+        if not bare or bare.startswith("@") or ("://" not in bare and "/" not in bare):
+            return None
         return GitRef(url=bare, target=target, ref=ref)
 
     if url_part.startswith(("http://", "https://", "file://")):

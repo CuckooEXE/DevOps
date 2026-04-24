@@ -45,13 +45,17 @@ _loaded: list[LoadedPlugin] | None = None
 def _compare_api_version(min_version: str) -> bool:
     """True if ``min_version`` is compatible with ``API_VERSION``.
 
-    v1 uses integer-string comparison (major-only). When we bump to v2
-    this logic will need to understand proper semver.
+    Compares only the major component, so a plugin that declares
+    ``MIN_API_VERSION = "1.2"`` is accepted as long as devops's major
+    version is ≥ 1. When we bump to a ``"2"``-generation API this
+    logic will need proper semver handling.
     """
     try:
-        return int(min_version) <= int(API_VERSION)
-    except ValueError:
+        min_major = int(min_version.split(".", 1)[0])
+        cur_major = int(API_VERSION.split(".", 1)[0])
+    except (ValueError, IndexError):
         return False
+    return min_major <= cur_major
 
 
 def _is_strict() -> bool:

@@ -81,7 +81,15 @@ class TestRangeTest(TestTarget):
         return []  # testrange is global; referenced artifacts build via deps
 
     def test_cmds(self, ctx: BuildContext) -> list[Command]:
-        testrange = ctx.toolchain_for(self.arch).extras["testrange"].resolved_for(
+        extras = ctx.toolchain_for(self.arch).extras
+        if "testrange" not in extras:
+            raise RuntimeError(
+                f"TestRangeTest {self.name!r}: no 'testrange' tool "
+                f"configured on toolchain for arch={self.arch!r}. "
+                f"Install the devops-testrange plugin or add "
+                f"[toolchain.extras]\\ntestrange = \"testrange\" to devops.toml."
+            )
+        testrange = extras["testrange"].resolved_for(
             workspace=ctx.workspace_root,
             project=self.project.root,
             cwd=self.project.root,

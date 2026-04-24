@@ -230,6 +230,24 @@ def test_toolchain_override_via_extras(tmp_project, tmp_path):
     assert "ghcr.io/acme/tr:v1" in cmd.argv
 
 
+def test_missing_testrange_extra_raises_friendly_error(tmp_project, tmp_path):
+    """Without extras["testrange"], test_cmds raises a RuntimeError
+    pointing at the plugin / devops.toml as fix paths — not a cryptic
+    KeyError."""
+    _write(tmp_path, "tests/smoke.py", "")
+    _, enter = tmp_project
+    with enter():
+        t = TestRangeTest(name="E2E", srcs=[tmp_path / "tests/smoke.py"])
+    ctx = BuildContext(
+        workspace_root=tmp_path,
+        build_dir=tmp_path / "build",
+        profile=OptimizationLevel.Debug,
+        toolchain=Toolchain(),
+    )
+    with pytest.raises(RuntimeError, match="no 'testrange' tool"):
+        t.test_cmds(ctx)
+
+
 def test_register_installs_class_and_tool_default():
     """register() should register TestRangeTest and seed a testrange tool."""
     from devops import api, plugins

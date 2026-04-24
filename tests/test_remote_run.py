@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from devops import remote_run
@@ -73,6 +72,20 @@ def test_parse_returns_none_for_plain_name():
 
 def test_parse_returns_none_for_missing_target():
     assert remote_run.parse_spec("git+ssh://host/repo::") is None
+
+
+def test_parse_returns_none_for_empty_git_url():
+    """`git+::Target` has no URL after the scheme — should be rejected."""
+    assert remote_run.parse_spec("git+::Target") is None
+
+
+def test_parse_returns_none_for_ref_only_git_url():
+    """`git+@v1::Target` peels `@v1` as the ref, leaving an empty url."""
+    assert remote_run.parse_spec("git+@v1::Target") is None
+
+
+def test_parse_returns_none_for_empty_url_part():
+    assert remote_run.parse_spec("::Target") is None
 
 
 # ---------- end-to-end via DirectoryRef ----------

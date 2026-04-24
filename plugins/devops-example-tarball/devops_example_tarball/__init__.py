@@ -52,12 +52,29 @@ class TarballArtifact(Artifact):
         )
 
     def build_cmds(self, ctx: BuildContext) -> list[Command]:
+        if "tar" not in ctx.toolchain_for(self.arch).extras:
+            raise RuntimeError(
+                f"TarballArtifact {self.name!r}: no 'tar' tool configured. "
+                f"Install the devops-example-tarball plugin or add "
+                f"[toolchain.extras]\\ntar = \"tar\" to devops.toml."
+            )
         tar = ctx.toolchain_for(self.arch).extras["tar"]
         out = self.output_path(ctx)
         # `tar -czf <out> -C <proj-root> <paths relative to proj-root>`
         # keeps the archive rooted at the project so the user gets
-        # familiar relative paths inside the tarball.
-        rel_srcs = [str(s.relative_to(self.project.root)) for s in self.srcs]
+        # familiar relative paths inside the tarball. Every src must
+        # live under the project root — reject early with a clear
+        # error rather than letting relative_to raise.
+        rel_srcs: list[str] = []
+        for s in self.srcs:
+            try:
+                rel_srcs.append(str(s.relative_to(self.project.root)))
+            except ValueError as e:
+                raise ValueError(
+                    f"TarballArtifact {self.name!r}: src {s} is outside "
+                    f"the project root {self.project.root} — only "
+                    f"in-project files can be tarred."
+                ) from e
         return [
             Command.shell_cmd(
                 f"mkdir -p {out.parent}",

@@ -108,6 +108,17 @@ def test_register_callable_installs_classes_and_tool_defaults(monkeypatch):
 # ---------- version gate ----------
 
 
+def test_dotted_min_api_version_accepted():
+    """`MIN_API_VERSION = "1.2"` should parse as major=1 and be accepted
+    when API_VERSION is "1" (major-only compatibility)."""
+    assert plugins._compare_api_version("1.2") is True
+    assert plugins._compare_api_version("1.0.99") is True
+
+
+def test_dotted_future_major_rejected():
+    assert plugins._compare_api_version("2.0") is False
+
+
 def test_min_api_version_too_high_skips_plugin(monkeypatch, capsys):
     mod = _dummy_module("plug_future", min_api_version="99")
 

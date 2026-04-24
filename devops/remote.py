@@ -72,6 +72,10 @@ class Ref:
     # time; prefer absolute (e.g. ``str(Path(__file__).parent / "..."))``.
     build: str | Path | None
 
+    def to_spec(self) -> str:
+        """Lower this ref to the ``<url>::<target>`` string the resolver uses."""
+        raise NotImplementedError
+
 
 @dataclass(frozen=True)
 class GitRef(Ref):

@@ -27,10 +27,11 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Protocol
 
 from devops import graph, registry
 from devops.cache import parse_depfile
+from devops.core.command import Command
 from devops.core.target import Artifact, Target
 
 if TYPE_CHECKING:
@@ -189,14 +190,15 @@ class _WatchdogWatcher:
     """watchdog.Observer-backed watcher."""
 
     def __init__(self) -> None:
-        self._observer = None  # type: ignore[assignment]
+        # watchdog is an optional dep; Any sidesteps needing a stub.
+        self._observer: Any = None
 
     def start(self, root: Path, on_change: Callable[[Path], None]) -> None:
         from watchdog.events import FileSystemEventHandler  # type: ignore[import-not-found]
         from watchdog.observers import Observer  # type: ignore[import-not-found]
 
-        class Handler(FileSystemEventHandler):
-            def on_any_event(self, event):  # type: ignore[no-untyped-def]
+        class Handler(FileSystemEventHandler):  # type: ignore[misc]
+            def on_any_event(self, event: Any) -> None:
                 if event.is_directory:
                     return
                 on_change(Path(event.src_path))
@@ -215,7 +217,7 @@ def _make_watcher(force_polling: bool) -> Watcher:
     if force_polling:
         return _PollingWatcher()
     try:
-        import watchdog  # noqa: F401
+        import watchdog  # type: ignore[import-not-found]  # noqa: F401
     except ImportError:
         return _PollingWatcher()
     return _WatchdogWatcher()
@@ -262,7 +264,7 @@ class _Debouncer:
 def _build_once(
     roots: list[Target],
     ctx: "BuildContext",
-    run_commands: Callable[[list, "BuildContext"], None],
+    run_commands: Callable[[list[Command], "BuildContext"], None],
 ) -> bool:
     """Build ``roots`` and their transitive deps. Returns True on success."""
     try:
@@ -286,7 +288,7 @@ def _build_once(
 def run(
     names: list[str] | None,
     ctx: "BuildContext",
-    run_commands: Callable[[list, "BuildContext"], None],
+    run_commands: Callable[[list[Command], "BuildContext"], None],
     *,
     debounce_ms: int = 250,
     clear_screen: bool = False,
@@ -328,9 +330,13 @@ def run(
     def _on_batch(paths: set[Path]) -> None:
         nonlocal roots, reverse_deps, targets_by_id, build_py_paths, reverse_index
 
-        # build.py / devops.toml change → full reload
-        if any(p.resolve() in build_py_paths for p in paths):
-            with rebuild_lock:
+        # Hold the lock across every state read + write. Two Timer
+        # threads can fire back-to-back if a new event arrives while
+        # _trigger is already running, so serialize to keep the nonlocal
+        # state consistent between branches.
+        with rebuild_lock:
+            # build.py / devops.toml change → full reload
+            if any(p.resolve() in build_py_paths for p in paths):
                 print("devops watch: build.py changed — re-discovering")
                 try:
                     discover_projects(workspace_root)
@@ -345,18 +351,17 @@ def run(
                 reverse_index = build_reverse_index(
                     registry.all_targets(), ctx, exclude_under=build_dir
                 )
-            return
+                return
 
-        affected = affected_targets(
-            paths, reverse_index, reverse_deps, targets_by_id
-        )
-        # Only rebuild Targets the user asked to watch (or their deps/consumers).
-        roots_set = {id(r) for r in roots}
-        reachable_from_roots = expand_consumers(roots, reverse_deps) | roots_set
-        affected_in_scope = [t for t in affected if id(t) in reachable_from_roots]
-        if not affected_in_scope:
-            return
-        with rebuild_lock:
+            affected = affected_targets(
+                paths, reverse_index, reverse_deps, targets_by_id
+            )
+            # Only rebuild Targets the user asked to watch (or their deps/consumers).
+            roots_set = {id(r) for r in roots}
+            reachable_from_roots = expand_consumers(roots, reverse_deps) | roots_set
+            affected_in_scope = [t for t in affected if id(t) in reachable_from_roots]
+            if not affected_in_scope:
+                return
             if clear_screen:
                 print("\033[2J\033[H", end="")
             names_list = ", ".join(t.name for t in affected_in_scope[:5])

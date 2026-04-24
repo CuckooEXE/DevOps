@@ -192,7 +192,7 @@ class CCompile:
         elif isinstance(inc, Target):
             target = inc
         else:
-            return inc  # Path
+            return Path(inc)  # str/Path — coerce
         if not isinstance(target, HeadersOnly):
             raise TypeError(
                 f"includes= only supports HeadersOnly targets "
@@ -272,6 +272,7 @@ class CCompile:
         Targets aren't in ``self.deps`` and topo-sort can't see them —
         we inline their build_cmds before our own link step so they
         actually exist on disk."""
+        from devops.core.target import Artifact
         from devops.remote import resolve_remote_ref
 
         cmds: list[Command] = []
@@ -284,7 +285,8 @@ class CCompile:
                 if target.qualified_name in seen:
                     continue
                 seen.add(target.qualified_name)
-                cmds.extend(target.build_cmds(ctx))
+                if isinstance(target, Artifact):
+                    cmds.extend(target.build_cmds(ctx))
         return cmds
 
     def _link_flags_for_libs(self, ctx: "BuildContext") -> tuple[list[str], list[Path]]:
@@ -412,7 +414,8 @@ class ElfBinary(CCompile, Artifact):
                 return spec
             if isinstance(spec, Ref):
                 return spec.to_spec()
-            return spec.qualified_name  # type: ignore[attr-defined]
+            name: str = spec.qualified_name  # type: ignore[attr-defined]
+            return name
 
         lib_list = ", ".join(_lib_label(s) for s in self.libs) or "-"
         inc_list = ", ".join(_include_label(inc) for inc in self.includes) or "-"
