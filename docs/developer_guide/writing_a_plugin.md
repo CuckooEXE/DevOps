@@ -1,5 +1,10 @@
 # Writing a devops plugin
 
+**Runnable example:** `examples/devops-example-tarball/` in this
+repo is a complete, pip-installable plugin you can copy as
+scaffolding. The walkthrough below re-builds its core pieces from
+scratch.
+
 A plugin is a normal Python package that registers new `Target`
 subclasses via an entry point. Once `pip install`ed into the same
 environment as `devops`, its classes become importable from

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devops-example-tarball"
+version = "0.1.0"
+description = "Example devops plugin: bundle files into a .tar.gz"
+requires-python = ">=3.11"
+dependencies = [
+    "devops-builder",
+]
+
+# The entry-point group is how devops discovers plugins. The right-hand
+# side is "<module>:<attribute>" — point at the `register(api)` callable
+# (or directly at a Target class for single-class plugins).
+[project.entry-points."devops.targets"]
+tarball = "devops_example_tarball:register"
+
+[tool.setuptools.packages.find]
+include = ["devops_example_tarball*"]
