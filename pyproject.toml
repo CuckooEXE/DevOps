@@ -34,11 +34,13 @@ strict = true
 files = ["devops", "builder"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "plugins"]
 pythonpath = ["."]
 # fixture/ contains a sample_project with its own tests that are driven via
 # `devops test` — don't let pytest's own collection descend in there.
-norecursedirs = ["fixtures", "build"]
+# Each plugin's top-level dir is skipped too; its tests live under tests/
+# which pytest auto-discovers inside the plugin directory.
+norecursedirs = ["fixtures", "build", "__pycache__", ".mypy_cache"]
 
 [tool.coverage.run]
 branch = true
