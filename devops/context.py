@@ -76,6 +76,7 @@ _DEFAULT_TOOLS = {
     "sphinx_build": "sphinx-build",
     "pytest": "pytest",
     "python": "python3",
+    "testrange": "testrange",
 }
 
 
@@ -95,6 +96,7 @@ class Toolchain:
     python: Tool = field(default_factory=lambda: Tool.of("python3"))
     zig: Tool = field(default_factory=lambda: Tool.of("zig"))
     shiv: Tool = field(default_factory=lambda: Tool.of("shiv"))
+    testrange: Tool = field(default_factory=lambda: Tool.of("testrange"))
 
     @classmethod
     def from_config(cls, cfg: dict[str, object] | None) -> "Toolchain":
