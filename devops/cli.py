@@ -442,6 +442,44 @@ def doctor(
     typer.echo(f"doctor ok — {len(needed)} tool(s) present")
 
 
+@app.command(name="graph")
+def graph_cmd(
+    names: list[str] = typer.Argument(None, autocompletion=_complete_any_target),
+    fmt: str = typer.Option("dot", "--format", "-f", help="dot, json, or text"),
+    output: str = typer.Option("-", "--output", "-o", help="Write to file; '-' for stdout"),
+    resolve_remotes: bool = typer.Option(
+        False, "--resolve-remotes",
+        help="Fetch and resolve GitRef/TarballRef/DirectoryRef dependencies (network).",
+    ),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+) -> None:
+    """Export the dependency DAG as dot, json, or text.
+
+    With no names, exports every registered target. With names, exports
+    the forward-transitive subgraph rooted at those targets. Remote refs
+    are opaque nodes unless --resolve-remotes is set.
+    """
+    from devops import graph_export
+
+    ctx = _prepare(profile=profile)
+    roots: list[Target] | None
+    if names:
+        roots = [_resolve(n) for n in names]
+    else:
+        roots = None
+
+    if fmt not in ("dot", "json", "text"):
+        typer.echo(f"error: unknown --format {fmt!r} (want dot, json, text)", err=True)
+        raise typer.Exit(1)
+
+    rendered = graph_export.render(fmt, roots, ctx=ctx, resolve_remotes=resolve_remotes)
+
+    if output == "-":
+        typer.echo(rendered, nl=False)
+    else:
+        Path(output).write_text(rendered)
+
+
 @app.command()
 def clean(
     names: list[str] = typer.Argument(None, autocompletion=_complete_artifact),

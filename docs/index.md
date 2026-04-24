@@ -33,6 +33,7 @@ user_guide/install
 user_guide/bootstrap
 user_guide/ci_docker
 user_guide/cli
+user_guide/graph
 ```
 
 ## For framework developers
