@@ -34,6 +34,7 @@ user_guide/bootstrap
 user_guide/ci_docker
 user_guide/cli
 user_guide/graph
+user_guide/watch
 ```
 
 ## For framework developers

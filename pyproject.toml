@@ -18,6 +18,9 @@ dev = [
     "mypy>=1.8",
     "build",
 ]
+watch = [
+    "watchdog>=4",
+]
 
 [project.scripts]
 devops = "devops.cli:main"

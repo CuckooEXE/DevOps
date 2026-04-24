@@ -442,6 +442,34 @@ def doctor(
     typer.echo(f"doctor ok — {len(needed)} tool(s) present")
 
 
+@app.command(name="watch")
+def watch_cmd(
+    names: list[str] = typer.Argument(None, autocompletion=_complete_artifact),
+    profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+    debounce_ms: int = typer.Option(250, "--debounce-ms"),
+    clear_screen: bool = typer.Option(False, "--clear-screen", "-c"),
+    poll: bool = typer.Option(False, "--poll", help="Force polling (skip watchdog)."),
+) -> None:
+    """Build once, then rebuild affected targets on file change.
+
+    With no names, watches every Artifact in the workspace. With names,
+    limits rebuilds to those targets and their forward-reachable
+    consumers.
+    """
+    from devops import watch as watch_mod
+
+    ctx = _prepare(profile=profile, verbose=verbose)
+    raise typer.Exit(watch_mod.run(
+        names=names,
+        ctx=ctx,
+        run_commands=_run_commands,
+        debounce_ms=debounce_ms,
+        clear_screen=clear_screen,
+        poll=poll,
+    ))
+
+
 @app.command(name="graph")
 def graph_cmd(
     names: list[str] = typer.Argument(None, autocompletion=_complete_any_target),
