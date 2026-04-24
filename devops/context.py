@@ -76,7 +76,6 @@ _DEFAULT_TOOLS = {
     "sphinx_build": "sphinx-build",
     "pytest": "pytest",
     "python": "python3",
-    "testrange": "testrange",
 }
 
 
@@ -96,7 +95,6 @@ class Toolchain:
     python: Tool = field(default_factory=lambda: Tool.of("python3"))
     zig: Tool = field(default_factory=lambda: Tool.of("zig"))
     shiv: Tool = field(default_factory=lambda: Tool.of("shiv"))
-    testrange: Tool = field(default_factory=lambda: Tool.of("testrange"))
     # Free-form namespace populated by plugins and/or [toolchain.extras]
     # in devops.toml. Plugin Targets read tools via
     # ``ctx.toolchain_for(self.arch).extras["cargo"]``.

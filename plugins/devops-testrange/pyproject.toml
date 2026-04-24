@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devops-testrange"
+version = "0.1.0"
+description = "devops plugin: libvirt-backed e2e testing via the testrange pip package"
+requires-python = ">=3.11"
+dependencies = [
+    "devops-builder",
+]
+
+[project.entry-points."devops.targets"]
+testrange = "devops_testrange:register"
+
+[tool.setuptools.packages.find]
+include = ["devops_testrange*"]

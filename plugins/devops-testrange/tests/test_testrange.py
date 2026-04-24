@@ -1,6 +1,8 @@
-"""TestRangeTest — libvirt-backed e2e target. Behaviour-focused tests
-(construction, env var contract, cmd shape) — no actual testrange or
-libvirt calls."""
+"""Tests for the TestRangeTest plugin.
+
+Behaviour-focused: construction, env-var contract, cmd shape,
+toolchain-extras override. No actual testrange or libvirt calls.
+"""
 
 from __future__ import annotations
 
@@ -8,17 +10,24 @@ from pathlib import Path
 
 import pytest
 
-from devops.context import BuildContext
+from devops.context import BuildContext, Tool, Toolchain
 from devops.options import OptimizationLevel
 from devops.targets.c_cpp import ElfBinary
-from devops.targets.tests import TestRangeTest, TestTarget
+from devops.targets.tests import TestTarget
+from devops_testrange import TestRangeTest
 
 
 def _ctx(tmp_path: Path) -> BuildContext:
+    # Seed the testrange tool in extras — plugin's register() would do
+    # this automatically in real use, but unit tests construct ctx
+    # directly without running plugin discovery.
+    tc = Toolchain()
+    tc.extras["testrange"] = Tool.of("testrange")
     return BuildContext(
         workspace_root=tmp_path,
         build_dir=tmp_path / "build",
         profile=OptimizationLevel.Debug,
+        toolchain=tc,
     )
 
 
@@ -78,7 +87,6 @@ def test_factory_defaults_to_gen_tests(tmp_project, tmp_path):
     with enter():
         t = TestRangeTest(name="E2E", srcs=[tmp_path / "tests/smoke.py"])
     cmd = t.test_cmds(_ctx(tmp_path))[0]
-    # Last argv arg is "<abs-path>:<factory>"
     assert cmd.argv[-1].endswith(":gen_tests")
 
 
@@ -203,15 +211,14 @@ def test_describe_shape(tmp_project, tmp_path):
     assert app.qualified_name in desc
 
 
-def test_toolchain_override_propagates(tmp_project, tmp_path, monkeypatch):
-    """A devops.toml override of toolchain.testrange must reach the Command."""
-    from devops.context import Tool, Toolchain
-
+def test_toolchain_override_via_extras(tmp_project, tmp_path):
+    """A devops.toml override of [toolchain.extras] testrange must reach the Command."""
     _write(tmp_path, "tests/smoke.py", "")
     _, enter = tmp_project
     with enter():
         t = TestRangeTest(name="E2E", srcs=[tmp_path / "tests/smoke.py"])
-    tc = Toolchain(testrange=Tool.of(["docker", "run", "--rm", "ghcr.io/acme/tr:v1", "testrange"]))
+    tc = Toolchain()
+    tc.extras["testrange"] = Tool.of(["docker", "run", "--rm", "ghcr.io/acme/tr:v1", "testrange"])
     ctx = BuildContext(
         workspace_root=tmp_path,
         build_dir=tmp_path / "build",
@@ -221,3 +228,17 @@ def test_toolchain_override_propagates(tmp_project, tmp_path, monkeypatch):
     cmd = t.test_cmds(ctx)[0]
     assert cmd.argv[0] == "docker"
     assert "ghcr.io/acme/tr:v1" in cmd.argv
+
+
+def test_register_installs_class_and_tool_default():
+    """register() should register TestRangeTest and seed a testrange tool."""
+    from devops import api, plugins
+    from devops_testrange import register
+
+    plugins.reset_for_tests()
+    try:
+        register(api)
+        assert TestRangeTest in api._registered_classes()
+        assert "testrange" in api.DEFAULT_TOOLCHAIN_EXTRAS
+    finally:
+        plugins.reset_for_tests()

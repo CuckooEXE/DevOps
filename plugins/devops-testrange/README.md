@@ -1,20 +1,30 @@
-# TestRange e2e tests
+# devops-testrange
 
-`TestRangeTest` runs libvirt-backed end-to-end tests via the
-[`testrange`](https://pypi.org/project/testrange/) pip package. Use it
-when you need a full VM to exercise a built artifact — installer
-smoke tests, agent rollouts, service-on-service integration. Use
-`Pytest` or `GoogleTest` for unit-level checks.
+A devops plugin that wraps the
+[`testrange`](https://pypi.org/project/testrange/) pip package for
+libvirt-backed end-to-end testing. Use it when you need a full VM to
+exercise a built artifact — installer smoke tests, agent rollouts,
+service-on-service integration — and `Pytest` / `GoogleTest` aren't
+enough.
 
-`testrange` is treated as a global **tool** (like `pytest`); `devops`
-doesn't manage a venv for it. Install once per box: `pip install
-testrange`.
+## Install
 
-## Minimal example
+```sh
+pip install -e ./plugins/devops-testrange
+# or once published:
+pip install devops-testrange
+```
+
+`testrange` itself is a separate package (`pip install testrange`)
+and needs libvirt + KVM on the host. `devops doctor` flags it as
+missing if it isn't on `$PATH`.
+
+## Use
 
 ```python
 # build.py
-from builder import ElfBinary, TestRangeTest, glob
+from builder import ElfBinary, glob
+from builder.plugins import TestRangeTest
 
 myApp = ElfBinary(name="MyApp", srcs=glob("src/*.c"))
 
@@ -52,19 +62,20 @@ Run:
 devops test MyAppE2E
 ```
 
-`devops` builds `myApp` (via topo-sort from the `artifacts=` dep), then
+devops builds `myApp` via the topo-sort through `artifacts=`, then
 invokes `testrange run <src>:gen_tests` once per file in `srcs`.
 
-## The artifact contract
+## Artifact contract
 
 Every entry in `artifacts=` becomes an env var on the `testrange`
 invocation: `artifacts={"alias": target}` →
-`DEVOPS_ARTIFACT_<ALIAS>=<target.output_path>`. Keys are upper-cased,
-and the alias is **yours to choose** — renaming the underlying Target
-doesn't churn the env var name, which keeps the test code stable.
+`DEVOPS_ARTIFACT_<ALIAS>=<target.output_path>`. Keys are
+upper-cased; the alias is **yours to choose** — renaming the
+underlying Target doesn't churn the env var name, which keeps the
+test code stable.
 
-Artifacts also flow into the test target's `deps`, so `devops test`
-builds them before the test runs.
+Artifacts also flow into `self.deps`, so `devops test` builds them
+before the test runs.
 
 ## Kwargs
 
@@ -74,20 +85,20 @@ builds them before the test runs.
 | `srcs`       | required      | Python files, each with a `gen_tests` factory |
 | `artifacts`  | `None`        | `dict[str, Target]` — alias → built artifact |
 | `factory`    | `"gen_tests"` | factory function name inside each src |
-| `env`        | `None`        | extra env vars passed to `testrange` (e.g. `TESTRANGE_CACHE_DIR`) |
+| `env`        | `None`        | extra env vars passed to `testrange` |
 | `deps`       | `None`        | explicit Target deps beyond `artifacts` |
 | `doc`        | `None`        | shown under `devops describe` |
 
-Multiple srcs run as independent `testrange` invocations (one `Command`
-each); any non-zero exit fails the whole target.
+Multiple srcs run as independent `testrange` invocations (one
+`Command` each); any non-zero exit fails the whole target.
 
 ## Overriding `testrange` in `devops.toml`
 
-Same as any Tool entry. Useful if your team runs `testrange` inside a
-container that wraps libvirt:
+Same as any Tool entry. Useful if your team runs `testrange` inside
+a container that wraps libvirt:
 
 ```toml
-[toolchain]
+[toolchain.extras]
 testrange = [
     "docker", "run", "--rm",
     "-v", "{workspace}:{workspace}",
@@ -101,13 +112,11 @@ testrange = [
 ## Notes
 
 - `devops test` on a box without libvirt (or without `testrange` on
-  `$PATH`) will fail the command — that's a real configuration error,
-  not a test regression. Gate such runs on CI machines that have the
-  backing infra.
+  `$PATH`) fails the command — that's a real configuration error,
+  not a test regression. Gate such runs on CI machines that have
+  the backing infra.
 - The first `testrange run` for a fresh VM spec boots the VM and
-  snapshots the post-install disk into `/var/tmp/testrange/<user>/` —
-  minutes. Subsequent runs hit that cache and finish in seconds. See
-  the [`testrange` docs](https://testrange.readthedocs.io/) for cache
-  tuning.
-- `TestRangeTest` emits no `build_cmds()` of its own; artifacts build
-  via `deps`, and the tool itself is assumed ready.
+  snapshots the post-install disk into `/var/tmp/testrange/<user>/`
+  — minutes. Subsequent runs hit that cache and finish in seconds.
+- `TestRangeTest` emits no `build_cmds()` of its own; artifacts
+  build via `deps`, and the tool itself is assumed ready.

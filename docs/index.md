@@ -25,7 +25,6 @@ user_guide/build_py
 user_guide/target_types
 user_guide/scripts
 user_guide/testing
-user_guide/testrange_tests
 user_guide/docker_toolchains
 user_guide/cross_compile
 user_guide/remote_refs

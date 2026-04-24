@@ -20,7 +20,6 @@ from builder import (
     Script,
     SphinxDocs,
     StaticLibrary,
-    TestRangeTest,
     ZigBinary,
     ZigTest,
     glob,
@@ -280,20 +279,6 @@ LdBinary(
 # ---------------------------------------------------------------------------
 # CustomArtifact with required_tools= so `devops doctor` can preflight it.
 # ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# TestRangeTest — libvirt-backed e2e smoke test. Reads MyCoolApp's host
-# path from DEVOPS_ARTIFACT_APP and uploads it into the VM. Requires a
-# globally-installed `testrange` + libvirt; skipped on machines without.
-# ---------------------------------------------------------------------------
-
-TestRangeTest(
-    name="MyCoolAppE2E",
-    srcs=glob("tests/e2e/*.py"),
-    artifacts={"app": myCoolApp, "mylib": myLib},
-    doc="End-to-end: boot a Debian VM, upload MyCoolApp + libMyCoolLib.so.",
-)
-
 
 CustomArtifact(
     name="MyCoolAppSize",

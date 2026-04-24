@@ -1,8 +1,9 @@
-"""Test targets: GoogleTest (C/C++), Pytest (Python), and TestRangeTest
-(libvirt-backed e2e via the ``testrange`` pip package).
+"""Test targets: GoogleTest (C/C++) and Pytest (Python).
 
 `devops test [<name>...]` selects everything whose class is a TestTarget
-descendant (or all workspace test targets if no name given).
+descendant (or all workspace test targets if no name given). Additional
+test-target types (e.g. ``TestRangeTest`` for libvirt-backed e2e) ship
+as separate plugins under ``plugins/``.
 """
 
 from __future__ import annotations
@@ -179,90 +180,3 @@ class Pytest(TestTarget):
         )
 
 
-class TestRangeTest(TestTarget):
-    """Run libvirt-backed e2e tests via the ``testrange`` pip package.
-
-    Each ``srcs`` entry is a Python file exposing a ``gen_tests`` factory
-    (override with ``factory=``). At ``devops test`` time we invoke
-    ``testrange run <src>:<factory>`` once per src.
-
-    ``artifacts`` maps stable aliases to built Targets. Each alias
-    materializes as a ``DEVOPS_ARTIFACT_<ALIAS>`` env var on the
-    ``testrange`` invocation, so the test function can discover
-    built-binary paths without hardcoding them:
-
-        artifacts={"app": myBinary}   →   os.environ["DEVOPS_ARTIFACT_APP"]
-
-    Every artifact flows into ``self.deps`` so topo-sort builds them
-    before the test runs.
-
-    The ``testrange`` binary itself is looked up via
-    ``ctx.toolchain.testrange`` — install it globally (pip install
-    testrange) or override the invocation in ``devops.toml``.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        srcs: SourcesSpec,
-        artifacts: dict[str, Target] | None = None,
-        factory: str = "gen_tests",
-        env: dict[str, str] | None = None,
-        deps: dict[str, Target] | None = None,
-        version: str | None = None,
-        doc: str | None = None,
-    ) -> None:
-        super().__init__(name=name, deps=deps, version=version, doc=doc)
-        self.srcs = _resolve_sources(self.project.root, srcs)
-        self._artifacts: dict[str, Target] = dict(artifacts or {})
-        self.factory = factory
-        self._env = dict(env or {})
-        for alias, artifact in self._artifacts.items():
-            self.deps[f"_artifact_{alias}"] = artifact
-
-    def output_path(self, ctx: "BuildContext") -> Path:
-        return self.output_dir(ctx) / ".testrange_stamp"
-
-    def build_cmds(self, ctx: "BuildContext") -> list[Command]:
-        return []  # testrange is global; referenced artifacts build via deps
-
-    def test_cmds(self, ctx: "BuildContext") -> list[Command]:
-        testrange = ctx.toolchain.testrange.resolved_for(
-            workspace=ctx.workspace_root,
-            project=self.project.root,
-            cwd=self.project.root,
-        )
-        env: list[tuple[str, str]] = []
-        artifact_inputs: list[Path] = []
-        for alias, artifact in self._artifacts.items():
-            out = artifact.output_path(ctx)
-            env.append((f"DEVOPS_ARTIFACT_{alias.upper()}", str(out)))
-            artifact_inputs.append(out)
-        for k, v in self._env.items():
-            env.append((k, v))
-        env_tuple = tuple(env)
-        return [
-            Command(
-                argv=testrange.invoke(["run", f"{src}:{self.factory}"]),
-                cwd=self.project.root,
-                env=env_tuple,
-                label=f"testrange {self.name} / {src.name}",
-                inputs=(src, *artifact_inputs),
-            )
-            for src in self.srcs
-        ]
-
-    def describe(self) -> str:
-        if self._artifacts:
-            alias_list = ", ".join(
-                f"{alias}={a.qualified_name}"
-                for alias, a in self._artifacts.items()
-            )
-        else:
-            alias_list = "-"
-        return (
-            f"TestRangeTest {self.qualified_name}\n"
-            f"  srcs:      {', '.join(s.name for s in self.srcs)}\n"
-            f"  factory:   {self.factory}\n"
-            f"  artifacts: {alias_list}"
-        )

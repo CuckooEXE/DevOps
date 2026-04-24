@@ -19,7 +19,7 @@ from devops.targets.docs import SphinxDocs
 from devops.targets.install import Install
 from devops.targets.python import PythonApp, PythonShiv, PythonWheel
 from devops.targets.script import Script
-from devops.targets.tests import GoogleTest, Pytest, TestRangeTest
+from devops.targets.tests import GoogleTest, Pytest
 from devops.targets.zig import ZigBinary, ZigTest
 
 
@@ -58,7 +58,6 @@ __all__ = [
     "Script",
     "GoogleTest",
     "Pytest",
-    "TestRangeTest",
     "Install",
     "ZigBinary",
     "ZigTest",
