@@ -4,8 +4,14 @@ A short tour of the moving parts. Source under `devops/` unless noted.
 
 ## The user-facing surface: `builder/`
 
-`builder/__init__.py` re-exports everything a `build.py` imports. It's
-intentionally thin so the stable contract is small.
+- **`builder/__init__.py`** re-exports the core target types a
+  `build.py` imports (`ElfBinary`, `Script`, `Install`, etc.).
+  Intentionally thin so the stable contract stays small.
+- **`builder/plugins`** is a submodule populated at import time from
+  installed plugins' entry points (see `devops/plugins.py`). User
+  build.py files write `from builder.plugins import FooTarget` for
+  plugin-contributed types, keeping core vs plugin obvious at every
+  call site.
 
 ## Core types: `devops/core/`
 
@@ -30,21 +36,37 @@ intentionally thin so the stable contract is small.
   correct Project in the registry during exec.
 - **`graph.py`** — topological sort over `Target.deps`. Raises on
   cycles.
+- **`graph_export.py`** — renders the registered graph as dot / json
+  / text for `devops graph`. Edge kinds are recovered from the dep
+  key prefix (`_lib_`, `_inc_`, `_obj_`, `_in_`, `_install_`).
 - **`cache.py`** — stamp-file-based incremental build. Each Command's
   first output gets a `<output>.stamp` next to it, containing
   `sha256(argv + input mtimes)`. A Command is "fresh" if the stamp
   matches and every declared output exists.
+- **`watch.py`** — rebuild-on-change inner loop. Builds a reverse
+  index over every target's inputs + depfile-discovered headers,
+  debounces editor-save bursts, and re-runs affected targets
+  through the same cache layer. Watchdog if installed, polling
+  fallback otherwise.
 
 ## Built-in targets: `devops/targets/`
 
 - **`c_cpp.py`** — `CCompile` mixin + `ElfBinary`, `ElfSharedObject`,
-  `StaticLibrary`, `HeadersOnly`. The `CCompile._compile_flags()`
-  method is the single source of truth for flags; build AND lint both
-  call it.
-- **`python.py`** — `PythonWheel` wrapping `python -m build`.
+  `StaticLibrary`, `HeadersOnly`, `CObjectFile`, `LdBinary`. The
+  `CCompile._compile_flags()` method is the single source of truth
+  for flags; build AND lint both call it.
+- **`python.py`** — `PythonWheel`, `PythonApp`, `PythonShiv`.
 - **`docs.py`** — `SphinxDocs` wrapping `sphinx-build`.
+- **`custom.py`** — `CustomArtifact`: arbitrary shell commands with
+  templated inputs/outputs. The escape hatch when nothing else fits.
+- **`install.py`** — `Install`: stage binaries/libs under a dest, or
+  pip-install wheels.
+- **`zig.py`** — `ZigBinary`, `ZigTest` delegating to `zig build`.
 - **`script.py`** — re-exports `Script` from `core.target`.
 - **`tests.py`** — `TestTarget` (marker base), `GoogleTest`, `Pytest`.
+
+Additional target types (e.g. libvirt-backed e2e via
+`TestRangeTest`) ship as separate plugins under `plugins/`.
 
 ## Lint tools: `devops/tools/`
 
@@ -61,7 +83,37 @@ carries an argv prefix (so `cc` can be `["docker", "run", ...,
 "clang"]`). Placeholders `{workspace}`, `{project}`, `{cwd}` are
 expanded per-Command via `Tool.resolved_for(...)`.
 
+`Toolchain.extras: dict[str, Tool]` is the plugin namespace — plugins
+seed defaults at register time via `DEFAULT_TOOLCHAIN_EXTRAS` and
+users override per-project / per-arch in `[toolchain.extras]` /
+`[toolchain.<arch>.extras]` tables.
+
 Loaded from `devops.toml` at workspace root.
+
+## Remote refs + ad-hoc runs: `devops/{remote,remote_run}.py`
+
+- **`remote.py`** — `GitRef` / `TarballRef` / `DirectoryRef` for
+  external-project deps. Lazy fetch at link time into
+  `~/.cache/devops/remotes/<hash>/`. Referenced from `libs=` /
+  `includes=` on C/C++ targets.
+- **`remote_run.py`** — parses a CLI spec string
+  (`git+ssh://…::Target`, etc.) into the matching `Ref`, and builds
+  an ad-hoc `BuildContext` so `devops run <remote-spec>` /
+  `devops build <remote-spec>` / `devops describe <remote-spec>`
+  work from any cwd without a local workspace.
+
+## Plugins: `devops/{api,plugins,testing}.py`
+
+- **`api.py`** — stable import surface plugin authors depend on.
+  `API_VERSION = "1"`; plugins declare `MIN_API_VERSION` and the
+  loader warns-and-skips incompatible ones.
+- **`plugins.py`** — discovers the `devops.targets` entry-point
+  group, calls each plugin's `register(api)` hook (or registers a
+  bare Target class), caches the result process-locally. Errors are
+  warn-and-skip by default; `DEVOPS_STRICT_PLUGINS=1` escalates to
+  hard failures for CI.
+- **`testing.py`** — helpers for plugin authors: `make_ctx(...)`,
+  `active_project(...)`, `assert_command_shape(...)`.
 
 ## CLI: `devops/cli.py`
 

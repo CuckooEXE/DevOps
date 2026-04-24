@@ -3,6 +3,26 @@
 Two flavours: subclass an existing target to bake in defaults, or land a
 wholly new target type.
 
+## Subclass in-tree vs ship a plugin
+
+**Subclass in-tree** when the target is internal to your org and you
+want it to live alongside the rest of the devops source. Cheap to
+write; no packaging overhead. The `TeamBinary` example below is the
+canonical shape.
+
+**Write a plugin** when the target is meant to be reusable across
+repos or shared with other teams. A plugin is a normal
+pip-installable package that registers its classes via the
+`devops.targets` entry-point group; consumers then write
+`from builder.plugins import YourTarget`. See {doc}`writing_a_plugin`
+for the full reference and `plugins/devops-example-tarball/` in the
+repo for runnable scaffolding.
+
+The mechanics below apply to in-tree additions; the plugin path is
+almost identical but imports come from `devops.api` and tool
+registration goes through `DEFAULT_TOOLCHAIN_EXTRAS` instead of
+`Toolchain` dataclass fields.
+
 ## Subclassing an existing target
 
 If most of your team's binaries share flags, pin them once:
@@ -60,8 +80,11 @@ class GoBinary(Artifact):
         return self.output_dir(ctx) / self.name
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
-        # ctx.toolchain.go doesn't exist yet — you'd add it to Toolchain
-        # in devops/context.py first.
+        # For an in-tree target, add a new field to Toolchain in
+        # devops/context.py (`go: Tool = field(default_factory=...)`)
+        # and read it as `ctx.toolchain.go`. For a plugin, register
+        # the tool into `ctx.toolchain.extras["go"]` via the plugin's
+        # register() hook instead.
         tool = ctx.toolchain.go.resolved_for(
             workspace=ctx.workspace_root,
             project=self.project.root,
@@ -103,8 +126,11 @@ and add to `__all__`.
       `clean_cmds(ctx)`
 - [ ] Implement `describe()` → short pretty header string
 - [ ] Add a new `Tool` to `devops/context.Toolchain` if you need a new
-      executable, with a sensible default argv prefix
+      executable, with a sensible default argv prefix (in-tree) — or
+      register it via `DEFAULT_TOOLCHAIN_EXTRAS` from a plugin's
+      `register()` hook so `ctx.toolchain.extras["<name>"]` resolves
 - [ ] Re-export from `builder/__init__.py` and list in `__all__`
+      (in-tree only — plugin classes auto-inject into `builder.plugins`)
 - [ ] Add tests covering the command shape (see the `test_targets_*.py`
       files for the pattern)
 
