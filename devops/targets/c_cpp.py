@@ -266,6 +266,27 @@ class CCompile:
             objs.append(cmd.outputs[0])
         return cmds, objs
 
+    def _remote_dep_build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        """Build commands for any remote Target that `libs=` or `includes=`
+        refs point at. Resolution is lazy (network-backed), so those
+        Targets aren't in ``self.deps`` and topo-sort can't see them —
+        we inline their build_cmds before our own link step so they
+        actually exist on disk."""
+        from devops.remote import resolve_remote_ref
+
+        cmds: list[Command] = []
+        seen: set[str] = set()
+        for entries in (self.libs, self.includes):
+            for entry in entries:
+                if not isinstance(entry, Ref):
+                    continue
+                target = resolve_remote_ref(entry)
+                if target.qualified_name in seen:
+                    continue
+                seen.add(target.qualified_name)
+                cmds.extend(target.build_cmds(ctx))
+        return cmds
+
     def _link_flags_for_libs(self, ctx: "BuildContext") -> tuple[list[str], list[Path]]:
         """Return (linker args, extra input paths).
 
@@ -361,6 +382,7 @@ class ElfBinary(CCompile, Artifact):
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
         out_dir = self.output_dir(ctx)
+        remote_cmds = self._remote_dep_build_cmds(ctx)
         compile_cmds, objs = self._compile_all(ctx, out_dir)
         lib_args, extra_inputs = self._link_flags_for_libs(ctx)
         tc = ctx.toolchain_for(self.arch)
@@ -375,7 +397,7 @@ class ElfBinary(CCompile, Artifact):
             inputs=(*objs, *extra_inputs, *self._extra_inputs),
             outputs=(self.output_path(ctx),),
         )
-        return [*compile_cmds, link_cmd]
+        return [*remote_cmds, *compile_cmds, link_cmd]
 
     def lint_cmds(self, ctx: "BuildContext") -> list[Command]:
         from devops.tools import clang
@@ -413,6 +435,7 @@ class ElfSharedObject(ElfBinary):
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
         out_dir = self.output_dir(ctx)
+        remote_cmds = self._remote_dep_build_cmds(ctx)
         compile_cmds, objs = self._compile_all(ctx, out_dir)
         lib_args, extra_inputs = self._link_flags_for_libs(ctx)
         tc = ctx.toolchain_for(self.arch)
@@ -427,7 +450,7 @@ class ElfSharedObject(ElfBinary):
             inputs=(*objs, *extra_inputs, *self._extra_inputs),
             outputs=(self.output_path(ctx),),
         )
-        return [*compile_cmds, link_cmd]
+        return [*remote_cmds, *compile_cmds, link_cmd]
 
 
 class StaticLibrary(CCompile, Artifact):
