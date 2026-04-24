@@ -156,21 +156,44 @@ def _build_transitively(t: Artifact, ctx: BuildContext) -> None:
 # ---------- subcommands ----------
 
 
+def _print_target(t: Target) -> None:
+    typer.echo(t.describe())
+    if t.deps:
+        typer.echo(f"  deps: {', '.join(f'{k}={v.qualified_name}' for k, v in t.deps.items())}")
+    if t.doc:
+        for line in t.doc.splitlines():
+            typer.echo(f"  | {line}")
+    typer.echo("")
+
+
 @app.command()
 def describe(names: list[str] = typer.Argument(None, autocompletion=_complete_any_target)) -> None:
-    """Pretty-print targets and their deps."""
+    """Pretty-print targets and their deps.
+
+    Accepts either local target names or remote specs (e.g.
+    ``git+ssh://host/repo@ref::Target``, ``file:///path/to/dir::Target``).
+    """
+    from devops import remote_run
+
+    # If any name is a remote spec, resolve those against their source
+    # rather than the local workspace.
+    if names and any(remote_run.parse_spec(n) is not None for n in names):
+        for n in names:
+            ref = remote_run.parse_spec(n)
+            if ref is None:
+                _prepare()  # lazy — only if we hit a local name
+                _print_target(_resolve(n))
+                continue
+            _, t = remote_run.resolve(n)
+            _print_target(t)
+        return
+
     _prepare()
     targets = registry.all_targets()
     if names:
         targets = [_resolve(n) for n in names]
     for t in targets:
-        typer.echo(t.describe())
-        if t.deps:
-            typer.echo(f"  deps: {', '.join(f'{k}={v.qualified_name}' for k, v in t.deps.items())}")
-        if t.doc:
-            for line in t.doc.splitlines():
-                typer.echo(f"  | {line}")
-        typer.echo("")
+        _print_target(t)
 
 
 @app.command()
@@ -179,7 +202,25 @@ def build(
     profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Build an artifact (and its transitive deps)."""
+    """Build an artifact (and its transitive deps).
+
+    Accepts either a local target name or a remote spec such as
+    ``git+ssh://host/repo[@ref]::Target`` — the remote source is
+    cloned/fetched and built in place.
+    """
+    from devops import remote_run
+
+    ref = remote_run.parse_spec(name)
+    if ref is not None:
+        _, t = remote_run.resolve(name)
+        if not isinstance(t, Artifact):
+            typer.echo(f"error: {name} is a {type(t).__name__}, not an Artifact", err=True)
+            raise typer.Exit(1)
+        ctx = remote_run.adhoc_context(t, ref, profile=profile, verbose=verbose)
+        _build_transitively(t, ctx)
+        typer.echo(f"built: {t.output_path(ctx)}")
+        return
+
     ctx = _prepare(profile=profile, verbose=verbose)
     t = _resolve(name)
     if not isinstance(t, Artifact):
@@ -189,16 +230,58 @@ def build(
     typer.echo(f"built: {t.output_path(ctx)}")
 
 
+def _exec_artifact(t: Artifact, ctx: BuildContext, args: list[str], cwd: Path) -> None:
+    """Build `t` transitively, then exec its output with user args from `cwd`."""
+    from devops.targets.c_cpp import ElfSharedObject, HeadersOnly, StaticLibrary
+
+    if isinstance(t, (ElfSharedObject, StaticLibrary, HeadersOnly)):
+        typer.echo(f"error: {t.qualified_name} is a library; libraries can't be run", err=True)
+        raise typer.Exit(1)
+    _build_transitively(t, ctx)
+    argv = (str(t.output_path(ctx)), *args)
+    _run_commands([Command(argv=argv, cwd=cwd, label=f"exec {t.name}")], ctx)
+
+
 @app.command()
 def run(
-    name: str = typer.Argument(..., autocompletion=_complete_runnable),
+    spec: str = typer.Argument(..., autocompletion=_complete_runnable),
+    args: list[str] = typer.Argument(None),
     profile: OptimizationLevel = typer.Option(OptimizationLevel.Debug, "--profile"),
     verbose: bool = False,
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """Execute an Artifact's output, or run a Script."""
+    """Execute an Artifact's output, or run a Script.
+
+    ``spec`` may be a local target name or a remote spec such as
+    ``git+ssh://host/repo[@ref]::Target``. Remote specs clone/fetch the
+    source, build the target, and exec it from your current cwd.
+    Arguments after the spec are forwarded to the executed binary:
+
+        devops run git+ssh://host/acme/tools::mycli -- --flag=val
+    """
+    from devops import remote_run
+
+    user_cwd = Path.cwd()
+    user_args = list(args or [])
+
+    ref = remote_run.parse_spec(spec)
+    if ref is not None:
+        _, t = remote_run.resolve(spec)
+        ctx = remote_run.adhoc_context(t, ref, profile=profile, verbose=verbose, dry_run=dry_run)
+        if isinstance(t, Script):
+            for dep in graph.topo_order([t]):
+                if isinstance(dep, Artifact):
+                    _run_commands(dep.build_cmds(ctx), ctx)
+            _run_commands(t.run_cmds(ctx), ctx)
+            return
+        if isinstance(t, Artifact):
+            _exec_artifact(t, ctx, user_args, user_cwd)
+            return
+        typer.echo(f"error: don't know how to run {type(t).__name__}", err=True)
+        raise typer.Exit(1)
+
     ctx = _prepare(profile=profile, verbose=verbose, dry_run=dry_run)
-    t = _resolve(name)
+    t = _resolve(spec)
     if isinstance(t, Script):
         # Build any Artifact deps first
         for dep in graph.topo_order([t]):
@@ -207,14 +290,7 @@ def run(
         _run_commands(t.run_cmds(ctx), ctx)
         return
     if isinstance(t, Artifact):
-        # Special case: libraries aren't runnable
-        from devops.targets.c_cpp import ElfSharedObject, HeadersOnly, StaticLibrary
-
-        if isinstance(t, (ElfSharedObject, StaticLibrary, HeadersOnly)):
-            typer.echo(f"error: {name} is a library; libraries can't be run", err=True)
-            raise typer.Exit(1)
-        _build_transitively(t, ctx)
-        _run_commands([Command(argv=(str(t.output_path(ctx)),), cwd=t.project.root, label=f"exec {t.name}")], ctx)
+        _exec_artifact(t, ctx, user_args, user_cwd)
         return
     typer.echo(f"error: don't know how to run {type(t).__name__}", err=True)
     raise typer.Exit(1)

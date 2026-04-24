@@ -29,6 +29,7 @@ user_guide/testrange_tests
 user_guide/docker_toolchains
 user_guide/cross_compile
 user_guide/remote_refs
+user_guide/remote_run
 user_guide/install
 user_guide/bootstrap
 user_guide/ci_docker
