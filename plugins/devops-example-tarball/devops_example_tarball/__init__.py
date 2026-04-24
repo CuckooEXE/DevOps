@@ -7,7 +7,8 @@ entry-point callable that installs both.
 
 Usage in a consuming project's build.py::
 
-    from builder import TarballArtifact, glob
+    from builder import glob
+    from builder.plugins import TarballArtifact
 
     TarballArtifact(
         name="release",
@@ -17,7 +18,7 @@ Usage in a consuming project's build.py::
 
 Then::
 
-    pip install -e ./examples/devops-example-tarball
+    pip install -e ./plugins/devops-example-tarball
     devops build release           # → build/Debug/host/<proj>/release/release.tar.gz
 """
 

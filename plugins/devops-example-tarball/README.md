@@ -15,7 +15,7 @@ until the API version changes.
 From the devops repo root:
 
 ```sh
-pip install -e ./examples/devops-example-tarball
+pip install -e ./plugins/devops-example-tarball
 ```
 
 (Or from anywhere, if you've published your plugin: `pip install
@@ -26,7 +26,8 @@ devops-example-tarball`.)
 In any devops project's `build.py`:
 
 ```python
-from builder import TarballArtifact, glob
+from builder import glob
+from builder.plugins import TarballArtifact
 
 TarballArtifact(
     name="release",
@@ -34,6 +35,10 @@ TarballArtifact(
     doc="All shared libs + release notes.",
 )
 ```
+
+Plugin-contributed target types always live under `builder.plugins`
+— never `builder` itself — so the import line flags at a glance
+that the target isn't part of the core feature set.
 
 Then:
 
@@ -63,7 +68,7 @@ Three things make this a plugin rather than a one-off target class:
        api.DEFAULT_TOOLCHAIN_EXTRAS.setdefault("tar", Tool.of("tar"))
    ```
 
-   First line makes the class importable from `builder`. Second
+   First line makes the class importable from `builder.plugins`. Second
    seeds a default `tar` tool that users can override in their
    `devops.toml`:
 

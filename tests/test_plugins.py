@@ -240,7 +240,16 @@ def test_toolchain_extras_rejects_non_table(tmp_path):
 # ---------- builder facade injection ----------
 
 
-def test_plugin_class_injected_into_builder_namespace(monkeypatch):
+def _reimport_builder():
+    for mod in ("builder", "builder.plugins"):
+        if mod in sys.modules:
+            del sys.modules[mod]
+    import builder  # noqa: F401
+    import builder.plugins  # noqa: F401
+    return sys.modules["builder.plugins"]
+
+
+def test_plugin_class_injected_into_builder_plugins_namespace(monkeypatch):
     mod = _dummy_module("plug_inject")
 
     class Widget(Artifact):
@@ -258,19 +267,17 @@ def test_plugin_class_injected_into_builder_namespace(monkeypatch):
     mod.Widget = Widget
     _patch_entry_points(monkeypatch, [_FakeEntryPoint("inject", Widget)])
 
-    # Re-import builder to trigger _inject_plugin_classes under our patched EPs
-    if "builder" in sys.modules:
-        del sys.modules["builder"]
-    import builder  # noqa: F401
-    assert hasattr(builder, "Widget")
-    assert builder.Widget is Widget
+    bp = _reimport_builder()
+    assert hasattr(bp, "Widget")
+    assert bp.Widget is Widget
 
 
-def test_name_collision_with_builtin_skipped(monkeypatch, capsys):
-    mod = _dummy_module("plug_collide")
+def test_plugin_class_not_injected_into_core_builder(monkeypatch):
+    """Plugin classes live at builder.plugins.Foo, never builder.Foo."""
+    mod = _dummy_module("plug_isolated")
 
-    class ElfBinary(Artifact):  # same name as built-in
-        __module__ = "plug_collide"
+    class Isolated(Artifact):
+        __module__ = "plug_isolated"
 
         def build_cmds(self, ctx):
             return []
@@ -279,16 +286,59 @@ def test_name_collision_with_builtin_skipped(monkeypatch, capsys):
             return Path("/tmp")
 
         def describe(self):
-            return "fake ElfBinary"
+            return "Isolated"
 
-    mod.ElfBinary = ElfBinary
-    _patch_entry_points(monkeypatch, [_FakeEntryPoint("collide", ElfBinary)])
+    mod.Isolated = Isolated
+    _patch_entry_points(monkeypatch, [_FakeEntryPoint("iso", Isolated)])
 
-    if "builder" in sys.modules:
-        del sys.modules["builder"]
-    import builder  # noqa: F811
-    # Should keep the real built-in, not the plugin's fake
-    from devops.targets.c_cpp import ElfBinary as RealElfBinary
-    assert builder.ElfBinary is RealElfBinary
+    _reimport_builder()
+    import builder
+
+    assert not hasattr(builder, "Isolated")
+
+
+def test_plugin_vs_plugin_name_collision_skipped(monkeypatch, capsys):
+    """Two plugins registering the same class name: first wins, second warned."""
+    mod_a = _dummy_module("plug_a")
+    mod_b = _dummy_module("plug_b")
+
+    class DupeA(Artifact):
+        __module__ = "plug_a"
+
+        def build_cmds(self, ctx):
+            return []
+
+        def output_path(self, ctx):
+            return Path("/tmp/a")
+
+        def describe(self):
+            return "A"
+
+    class DupeB(Artifact):
+        __module__ = "plug_b"
+
+        def build_cmds(self, ctx):
+            return []
+
+        def output_path(self, ctx):
+            return Path("/tmp/b")
+
+        def describe(self):
+            return "B"
+
+    # Both classes named the same (to force collision)
+    DupeA.__name__ = "Dupe"
+    DupeB.__name__ = "Dupe"
+    mod_a.Dupe = DupeA
+    mod_b.Dupe = DupeB
+
+    _patch_entry_points(monkeypatch, [
+        _FakeEntryPoint("plug_a", DupeA),
+        _FakeEntryPoint("plug_b", DupeB),
+    ])
+
+    bp = _reimport_builder()
+    # First registration wins
+    assert bp.Dupe is DupeA
     err = capsys.readouterr().err
     assert "already bound" in err

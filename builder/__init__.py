@@ -71,26 +71,29 @@ __all__ = [
 
 
 # Plugin injection: any Target class a devops.targets entry point
-# registered becomes importable as `from builder import FooBinary`. A
-# plugin that collides with a built-in name is skipped with a warning.
+# registered becomes importable as `from builder.plugins import FooBinary`.
+# Keeping plugins in a separate namespace from core builtins makes the
+# source of each Target obvious at every call site and eliminates the
+# risk of a plugin shadowing a core class.
 def _inject_plugin_classes() -> None:
-    from devops import plugins
+    from builder import plugins as _plugins_ns
+    from devops import plugins as _loader
 
-    globs = globals()
-    for plugin in plugins.load_plugins():
+    for plugin in _loader.load_plugins():
         for cls in plugin.classes:
             name = cls.__name__
-            if name in globs:
+            if hasattr(_plugins_ns, name) and getattr(_plugins_ns, name) is not cls:
                 import sys
 
                 print(
-                    f"devops: plugin {plugin.name!r} tried to register {name!r} "
-                    f"— name already bound; skipping",
+                    f"devops: plugin {plugin.name!r} tried to register "
+                    f"{name!r} but that name is already bound — skipping",
                     file=sys.stderr,
                 )
                 continue
-            globs[name] = cls
-            __all__.append(name)
+            setattr(_plugins_ns, name, cls)
+            if name not in _plugins_ns.__all__:
+                _plugins_ns.__all__.append(name)
 
 
 _inject_plugin_classes()

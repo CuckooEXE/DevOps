@@ -1,19 +1,25 @@
 # Writing a devops plugin
 
-**Runnable example:** `examples/devops-example-tarball/` in this
+**Runnable example:** `plugins/devops-example-tarball/` in this
 repo is a complete, pip-installable plugin you can copy as
 scaffolding. The walkthrough below re-builds its core pieces from
-scratch.
+scratch. `plugins/devops-testrange/` is a second example that ships
+a real feature (libvirt-backed e2e tests) — read it side-by-side
+for a slightly larger reference.
 
 A plugin is a normal Python package that registers new `Target`
 subclasses via an entry point. Once `pip install`ed into the same
 environment as `devops`, its classes become importable from
-`builder`:
+`builder.plugins`:
 
 ```python
 # your_project/build.py
-from builder import RustBinary    # from the plugin
+from builder.plugins import RustBinary    # from the plugin
 ```
+
+Plugin classes always land under `builder.plugins.*`, never
+`builder.*` — that separation makes it obvious at every call site
+which targets are core and which come from an installed plugin.
 
 Use a plugin when:
 
@@ -208,11 +214,14 @@ def test_rust_build_cmds(tmp_path: Path):
 - **Plugins don't opt into the stamp cache** — it's automatic. You
   just need to declare correct `inputs=` / `outputs=` / `depfile=` on
   every Command. The cache does the rest.
-- **Dynamic injection into `builder`** means `mypy --strict` can't
-  see your plugin's classes when imported as `from builder import
-  RustBinary`. Either import from your plugin module directly, or
+- **Dynamic injection into `builder.plugins`** means `mypy --strict`
+  can't see your plugin's classes when imported as `from
+  builder.plugins import RustBinary`. Either import from your plugin
+  module directly (`from acme_devops_rust import RustBinary`), or
   ship a `py.typed` marker and document the tradeoff.
-- **Name collisions with built-ins** (`ElfBinary`, etc.) are
-  rejected; the built-in wins and the plugin class is dropped with a
-  warning. Prefix class names with your plugin's namespace
-  (`AcmeRustBinary`) if conflict is a risk.
+- **Name collisions between plugins** under `builder.plugins` are
+  rejected first-wins with a warning. Collisions with core classes
+  (`ElfBinary`, etc.) are impossible because core and plugins live
+  in separate namespaces. Prefix class names with your plugin's
+  namespace (`AcmeRustBinary`) if two plugins in the same ecosystem
+  might both want the short name.
