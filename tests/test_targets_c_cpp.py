@@ -82,6 +82,62 @@ def test_headersonly_stages_files(tmp_project, tmp_path):
     assert {c.label for c in stages} == {"stage a.h", "stage b.h"}
 
 
+def test_headersonly_strip_prefix_drops_wrapper_dir(tmp_project, tmp_path):
+    """strip_prefix="include" stages headers flat so consumers can
+    `#include "a.h"` through a single -I to output_path."""
+    _write(tmp_path, "include/a.h", "#pragma once\n")
+    _write(tmp_path, "include/sub/b.h", "#pragma once\n")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(
+            name="headers",
+            srcs=[tmp_path / "include/a.h", tmp_path / "include/sub/b.h"],
+            strip_prefix="include",
+        )
+    ctx = _ctx(tmp_path)
+    out = h.output_path(ctx)
+    stage_cmds = [c for c in h.build_cmds(ctx) if c.label.startswith("stage ")]
+    outputs = {c.outputs[0] for c in stage_cmds}
+    assert out / "a.h" in outputs
+    assert out / "sub" / "b.h" in outputs
+
+
+def test_headersonly_strip_prefix_rejects_mismatched_header(tmp_project, tmp_path):
+    _write(tmp_path, "other/a.h", "#pragma once\n")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(
+            name="headers",
+            srcs=[tmp_path / "other/a.h"],
+            strip_prefix="include",
+        )
+    with pytest.raises(ValueError, match="strip_prefix"):
+        h.build_cmds(_ctx(tmp_path))
+
+
+def test_headersonly_prep_creates_subdir_parents(tmp_project, tmp_path):
+    """Headers in subdirs need their parent dir to exist before cp runs."""
+    _write(tmp_path, "include/a.h", "#pragma once\n")
+    _write(tmp_path, "include/sub/deep/b.h", "#pragma once\n")
+    _, enter = tmp_project
+    with enter():
+        h = HeadersOnly(
+            name="headers",
+            srcs=[tmp_path / "include/a.h", tmp_path / "include/sub/deep/b.h"],
+            strip_prefix="include",
+        )
+    ctx = _ctx(tmp_path)
+    cmds = h.build_cmds(ctx)
+    prep = cmds[0]
+    assert prep.label == "prepare headers"
+    # The prep command must mkdir -p both the root output dir and every
+    # subdirectory a header lands in.
+    out = h.output_path(ctx)
+    prep_line = prep.argv[-1]  # shell_cmd sticks the script in argv[-1]
+    assert f"mkdir -p {out}" in prep_line
+    assert f"mkdir -p {out / 'sub' / 'deep'}" in prep_line
+
+
 def test_rpath_embedded_when_linking_sharedobject(tmp_project, tmp_path):
     _write(tmp_path, "lib.c", "int f(){return 0;}")
     _write(tmp_path, "main.c", "int main(){return 0;}")

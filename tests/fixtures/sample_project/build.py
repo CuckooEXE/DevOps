@@ -33,6 +33,7 @@ from builder import (
 headers = HeadersOnly(
     name="SampleHeaders",
     srcs=glob("include/*.h"),
+    strip_prefix="include",
     doc="Public header bundle shared across library + binary targets.",
 )
 

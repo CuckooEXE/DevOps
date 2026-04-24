@@ -746,26 +746,57 @@ class LdBinary(Artifact):
 
 
 class HeadersOnly(Artifact):
-    """A header bundle other targets can pick up as includes."""
+    """A header bundle other targets can pick up as includes.
+
+    Headers are staged under ``output_path(ctx)`` preserving their path
+    relative to the project root. If your source tree keeps public
+    headers under a wrapper directory (e.g. ``include/``) and your
+    consumers write ``#include "mylib.h"`` (not ``"include/mylib.h"``),
+    pass ``strip_prefix="include"`` so that wrapper is dropped during
+    staging — the consumer's ``-I<staged dir>`` will then resolve the
+    bare header name.
+    """
 
     def __init__(
         self,
         name: str,
         srcs: SourcesSpec,
+        strip_prefix: str | Path = "",
         deps: dict[str, Target] | None = None,
         doc: str | None = None,
     ) -> None:
         super().__init__(name=name, deps=deps, doc=doc)
         self.headers = _resolve_sources(self.project.root, srcs)
+        self.strip_prefix = Path(strip_prefix) if strip_prefix else None
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / "include"
 
+    def _staged_path(self, h: Path, out: Path) -> Path:
+        rel = h.relative_to(self.project.root)
+        if self.strip_prefix is not None:
+            try:
+                rel = rel.relative_to(self.strip_prefix)
+            except ValueError:
+                raise ValueError(
+                    f"HeadersOnly {self.name}: strip_prefix="
+                    f"{str(self.strip_prefix)!r} doesn't match header {rel}"
+                )
+        return out / rel
+
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
         out = self.output_path(ctx)
-        cmds = [Command.shell_cmd(f"mkdir -p {out}", label=f"prepare {self.name}")]
-        for h in self.headers:
-            dst = out / h.relative_to(self.project.root)
+        staged = [(h, self._staged_path(h, out)) for h in self.headers]
+        # Collect every unique parent dir (including `out` itself) so
+        # headers under subdirectories don't fail `cp` on missing dirs.
+        prep_dirs = sorted({out, *(dst.parent for _, dst in staged)})
+        cmds: list[Command] = [
+            Command.shell_cmd(
+                " && ".join(f"mkdir -p {d}" for d in prep_dirs),
+                label=f"prepare {self.name}",
+            )
+        ]
+        for h, dst in staged:
             cmds.append(
                 Command(
                     argv=("cp", str(h), str(dst)),
