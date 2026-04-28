@@ -790,15 +790,11 @@ class HeadersOnly(Artifact):
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
         out = self.output_path(ctx)
         staged = [(h, self._staged_path(h, out)) for h in self.headers]
-        # Collect every unique parent dir (including `out` itself) so
-        # headers under subdirectories don't fail `cp` on missing dirs.
-        prep_dirs = sorted({out, *(dst.parent for _, dst in staged)})
-        cmds: list[Command] = [
-            Command.shell_cmd(
-                " && ".join(f"mkdir -p {d}" for d in prep_dirs),
-                label=f"prepare {self.name}",
-            )
-        ]
+        # The runner's _ensure_output_parents creates each cp's
+        # outputs[0].parent before invocation, so a separate mkdir step
+        # is redundant — and harmful, because that step had no
+        # outputs= and so was always cache-stale.
+        cmds: list[Command] = []
         for h, dst in staged:
             cmds.append(
                 Command(

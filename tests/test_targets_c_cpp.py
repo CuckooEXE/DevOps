@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from devops.context import BuildContext
+from devops.core import runner
 from devops.options import COMMON_C_FLAGS, OptimizationLevel
 from devops.targets.c_cpp import (
     ElfBinary,
@@ -115,10 +116,11 @@ def test_headersonly_strip_prefix_rejects_mismatched_header(tmp_project, tmp_pat
         h.build_cmds(_ctx(tmp_path))
 
 
-def test_headersonly_prep_creates_subdir_parents(tmp_project, tmp_path):
-    """Headers in subdirs need their parent dir to exist before cp runs."""
-    _write(tmp_path, "include/a.h", "#pragma once\n")
-    _write(tmp_path, "include/sub/deep/b.h", "#pragma once\n")
+def test_headersonly_stages_into_nested_subdirs(tmp_project, tmp_path):
+    """Headers in subdirs must end up at the right relative path under
+    the staging root, with subdirectories created on the way."""
+    _write(tmp_path, "include/a.h", "// a\n")
+    _write(tmp_path, "include/sub/deep/b.h", "// b\n")
     _, enter = tmp_project
     with enter():
         h = HeadersOnly(
@@ -127,15 +129,10 @@ def test_headersonly_prep_creates_subdir_parents(tmp_project, tmp_path):
             strip_prefix="include",
         )
     ctx = _ctx(tmp_path)
-    cmds = h.build_cmds(ctx)
-    prep = cmds[0]
-    assert prep.label == "prepare headers"
-    # The prep command must mkdir -p both the root output dir and every
-    # subdirectory a header lands in.
+    runner.run_all(h.build_cmds(ctx), use_cache=True)
     out = h.output_path(ctx)
-    prep_line = prep.argv[-1]  # shell_cmd sticks the script in argv[-1]
-    assert f"mkdir -p {out}" in prep_line
-    assert f"mkdir -p {out / 'sub' / 'deep'}" in prep_line
+    assert (out / "a.h").read_text() == "// a\n"
+    assert (out / "sub" / "deep" / "b.h").read_text() == "// b\n"
 
 
 def test_rpath_embedded_when_linking_sharedobject(tmp_project, tmp_path):
