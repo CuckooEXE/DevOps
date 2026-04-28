@@ -87,6 +87,11 @@ def _stat_contribution(h: "hashlib._Hash", p: Path) -> None:
 def _current_hash(cmd: Command) -> str:
     h = hashlib.sha256()
     h.update(shlex.join(cmd.argv).encode() if not cmd.shell else cmd.argv[0].encode())
+    # Fold output paths into the hash so a stale stamp from a prior
+    # argv-identical Command at a different output path can't masquerade
+    # as fresh after the consumer renames its output.
+    for o in cmd.outputs:
+        h.update(f"|out:{o}".encode())
     for p in cmd.inputs:
         _stat_contribution(h, p)
     # Fold in discovered headers if the command emitted a depfile last run.
