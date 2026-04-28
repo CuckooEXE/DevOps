@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from devops.core.command import Command
-from devops.core.target import Artifact, Target
+from devops.core.target import Artifact, DepKind, Target
 from devops.remote import Ref
 from devops.targets._paths import validate_octal_mode
 from devops.targets._specs import resolve_target_spec
@@ -66,17 +66,18 @@ class Install(Target):
                     f"Install({name!r}): dest= required for "
                     f"{type(artifact).__name__}"
                 )
-            deps = {f"_install_{artifact.name}": artifact}
         elif isinstance(artifact, Ref):
             # Type-based dest validation deferred — we resolve at install_cmds.
-            deps = {}
+            pass
         else:
             raise TypeError(
                 f"Install.artifact must be Artifact or Ref, "
                 f"got {type(artifact).__name__}"
             )
 
-        super().__init__(name=name, deps=deps, doc=doc)
+        super().__init__(name=name, doc=doc)
+        if isinstance(artifact, Artifact):
+            self.register_dep(DepKind.INSTALL, artifact)
         self._artifact_spec: "Artifact | Ref" = artifact
         self.dest: Path | None = Path(dest) if dest is not None else None
         self.mode = mode

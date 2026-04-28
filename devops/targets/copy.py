@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from devops.core.command import Command
-from devops.core.target import Artifact, Target
+from devops.core.target import Artifact, DepKind, Target
 from devops.remote import Ref
 from devops.targets._paths import validate_octal_mode, validate_relative_path
 from devops.targets._specs import inline_ref_build_cmds, resolve_target_spec
@@ -63,7 +63,7 @@ class FileArtifact(Artifact):
         self._src_spec: "Target | Ref | None" = None
         if isinstance(src, Artifact):
             self._src_spec = src
-            self.deps[f"_src_{src.name}"] = src
+            self.register_dep(DepKind.COPY, src)
         elif isinstance(src, Ref):
             self._src_spec = src  # remote — resolved at build time
         elif isinstance(src, (str, Path)):
@@ -190,7 +190,7 @@ class DirectoryArtifact(Artifact):
         self._src_spec: "Target | Ref | None" = None
         if isinstance(src, Artifact):
             self._src_spec = src
-            self.deps[f"_src_{src.name}"] = src
+            self.register_dep(DepKind.COPY, src)
         elif isinstance(src, Ref):
             self._src_spec = src
         elif isinstance(src, (str, Path)):

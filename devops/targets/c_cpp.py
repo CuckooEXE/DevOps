@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
 from devops.core.command import Command
-from devops.core.target import Artifact, Project, Target
+from devops.core.target import Artifact, DepKind, Project, Target
 from devops.options import OptimizationLevel
 from devops.remote import Ref
 
@@ -364,10 +364,10 @@ class ElfBinary(CCompile, Artifact):
         # Targets in libs= / includes= flow into deps so topo-sort builds them first
         for spec in self.libs:
             if isinstance(spec, Target):
-                self.deps[f"_lib_{spec.name}"] = spec
+                self.register_dep(DepKind.LIB, spec)
         for inc in self.includes:
             if isinstance(inc, Target):
-                self.deps[f"_inc_{inc.name}"] = inc
+                self.register_dep(DepKind.INCLUDE, inc)
         if tests is not None:
             from devops.targets.tests import GoogleTest
 
@@ -480,7 +480,7 @@ class StaticLibrary(CCompile, Artifact):
         self._pic = False
         for inc in self.includes:
             if isinstance(inc, Target):
-                self.deps[f"_inc_{inc.name}"] = inc
+                self.register_dep(DepKind.INCLUDE, inc)
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / f"lib{self.name}.a"
@@ -564,7 +564,7 @@ class CObjectFile(CCompile, Artifact):
         self._pic = pic
         for inc in self.includes:
             if isinstance(inc, Target):
-                self.deps[f"_inc_{inc.name}"] = inc
+                self.register_dep(DepKind.INCLUDE, inc)
 
     def output_path(self, ctx: "BuildContext") -> Path:
         # Directory containing the produced .o files.
@@ -650,10 +650,10 @@ class LdBinary(Artifact):
         # them before this ld step.
         for o in self.objs:
             if isinstance(o, Target):
-                self.deps[f"_obj_{o.name}"] = o
+                self.register_dep(DepKind.OBJ, o)
         for lib in self.libs:
             if isinstance(lib, Target):
-                self.deps[f"_lib_{lib.name}"] = lib
+                self.register_dep(DepKind.LIB, lib)
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / self.name

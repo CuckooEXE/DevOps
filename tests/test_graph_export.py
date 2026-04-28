@@ -66,6 +66,52 @@ def test_json_classifies_include_edge(tmp_project, tmp_path):
     assert any(e["kind"] == "include" for e in data["edges"])
 
 
+def test_json_classifies_archive_and_copy_edges(tmp_project, tmp_path):
+    """Previously-unrecognized prefixes (_arc_, _src_) now flow through
+    DepKind so graph_export labels them with their real kind instead of
+    the generic ``"dep"`` fallback."""
+    from devops.targets.archive import CompressedArtifact, CompressionFormat
+    from devops.targets.copy import FileArtifact
+
+    _write(tmp_path, "data/a.txt", "alpha")
+    _write(tmp_path, "msg.txt", "hello")
+    _, enter = tmp_project
+    with enter():
+        upstream = FileArtifact(name="copied", src="msg.txt")
+        bundle = CompressedArtifact(
+            name="bundle",
+            format=CompressionFormat.TarGzip,
+            entries={"bin/copied.txt": upstream, "share/data": "data"},
+        )
+    data = json.loads(graph_export.render("json", [bundle], ctx=_ctx(tmp_path)))
+    edge_kinds = {e["kind"] for e in data["edges"]}
+    assert "archive" in edge_kinds
+
+
+def test_json_classifies_input_edge(tmp_project, tmp_path):
+    """CustomArtifact ``inputs={...: target}`` gets the ``input`` kind."""
+    from devops.targets.custom import CustomArtifact
+
+    _write(tmp_path, "src.txt", "x")
+    _, enter = tmp_project
+    with enter():
+        upstream = CustomArtifact(
+            name="up",
+            inputs={"src": "src.txt"},
+            outputs=["up.out"],
+            cmds=["cp {src} {out[0]}"],
+        )
+        downstream = CustomArtifact(
+            name="dn",
+            inputs={"up": upstream},
+            outputs=["dn.out"],
+            cmds=["cp {up.output_path} {out[0]}"],
+        )
+    data = json.loads(graph_export.render("json", [downstream], ctx=_ctx(tmp_path)))
+    edge_kinds = {e["kind"] for e in data["edges"]}
+    assert "input" in edge_kinds
+
+
 def test_dot_renders_nodes_and_edges(tmp_project, tmp_path):
     _write(tmp_path, "lib.c", "int f(){return 0;}")
     _write(tmp_path, "main.c", "int main(){return 0;}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,73 @@ from devops.version import resolve_version
 if TYPE_CHECKING:
     from devops.context import BuildContext
     from devops.core.command import Command
+
+
+class DepKind(str, Enum):
+    """Semantic kind of an entry in ``Target.deps``.
+
+    The value is the kind name; ``DepKind.prefix`` is the leading
+    string used to encode the kind into a deps-dict key. Subclasses
+    register typed deps via ``Target.register_dep(kind, target)``,
+    and ``kind_from_dep_key`` recovers the kind from an existing key
+    (used by ``graph_export`` to label edges).
+    """
+
+    LIB = "lib"
+    INCLUDE = "include"
+    OBJ = "obj"
+    INPUT = "input"
+    INSTALL = "install"
+    ARCHIVE = "archive"
+    COPY = "copy"
+    PYDEP = "pydep"
+    TESTED = "tested"
+
+    @property
+    def prefix(self) -> str:
+        return _DEP_PREFIX[self]
+
+
+_DEP_PREFIX: dict["DepKind", str] = {
+    # Update graph_export and any introspection code if you change a
+    # prefix — existing build trees may have dep keys with the old
+    # spelling that no longer round-trip.
+}
+
+
+def _register_kinds() -> None:
+    """Populate _DEP_PREFIX after DepKind is defined.
+
+    Two-step setup so ``DepKind.prefix`` can return values from a dict
+    that references DepKind members; the dict can't literal-construct
+    inside the class body before the class exists.
+    """
+    _DEP_PREFIX.update({
+        DepKind.LIB: "_lib_",
+        DepKind.INCLUDE: "_inc_",
+        DepKind.OBJ: "_obj_",
+        DepKind.INPUT: "_in_",
+        DepKind.INSTALL: "_install_",
+        DepKind.ARCHIVE: "_arc_",
+        DepKind.COPY: "_src_",
+        DepKind.PYDEP: "_pydep_",
+        DepKind.TESTED: "_tested_",
+    })
+
+
+_register_kinds()
+
+
+def kind_from_dep_key(key: str) -> "DepKind | None":
+    """Recover the DepKind from a ``deps`` dict key.
+
+    Returns ``None`` for keys that don't match any registered prefix
+    (e.g. user-supplied ``deps={"explicit_name": t}``).
+    """
+    for kind, prefix in _DEP_PREFIX.items():
+        if key.startswith(prefix):
+            return kind
+    return None
 
 
 class Project:
@@ -49,6 +117,25 @@ class Target(ABC):
         self.required_tools: tuple[str, ...] = tuple(required_tools or ())
         self.project: Project = registry.current_project()
         registry.register(self)
+
+    def register_dep(
+        self,
+        kind: "DepKind",
+        target: "Target",
+        *,
+        suffix: str | None = None,
+    ) -> None:
+        """Add a typed dep to ``self.deps``.
+
+        Subclass constructors call this rather than mutating ``deps``
+        directly so the kind survives in the dep key prefix. ``suffix``
+        defaults to ``target.name``; pass an explicit suffix when a
+        single artifact has multiple deps of the same kind that share a
+        target name (e.g. ``CompressedArtifact`` archive entries keyed
+        by integer index).
+        """
+        s = suffix if suffix is not None else target.name
+        self.deps[f"{kind.prefix}{s}"] = target
 
     def collect_tool_names(self, ctx: "BuildContext") -> set[str]:
         """Union of declared + auto-detected tool names this target needs.

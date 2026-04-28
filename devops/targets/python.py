@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from devops.core.command import Command
-from devops.core.target import Artifact, Target
+from devops.core.target import Artifact, DepKind, Target
 from devops.remote import Ref
 from devops.targets.c_cpp import SourcesSpec, _resolve_sources
 
@@ -206,7 +206,7 @@ class PythonApp(Artifact):
         # we don't want to do at build.py import.
         for d in self._python_deps_spec:
             if isinstance(d, PythonWheel):
-                self.deps[f"_pydep_{d.name}"] = d
+                self.register_dep(DepKind.PYDEP, d)
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / self.name
@@ -431,7 +431,7 @@ class PythonShiv(Artifact):
         self._python_deps_spec: list[PythonWheel | str | Ref] = list(python_deps or [])
         for d in self._python_deps_spec:
             if isinstance(d, PythonWheel):
-                self.deps[f"_pydep_{d.name}"] = d
+                self.register_dep(DepKind.PYDEP, d)
 
     def python_deps(self) -> list["PythonWheel"]:
         return [_resolve_python_dep(d, self.project) for d in self._python_deps_spec]

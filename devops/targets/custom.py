@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from devops.core.command import Command
-from devops.core.target import Artifact, Target, _TargetView
+from devops.core.target import Artifact, DepKind, Target, _TargetView
 from devops.remote import Ref
 from devops.targets._specs import inline_ref_build_cmds, resolve_target_spec
 
@@ -70,8 +70,9 @@ class CustomArtifact(Artifact):
             for k, v in inputs.items():
                 if isinstance(v, Target):
                     self._inputs_raw[k] = v
-                    # Target inputs flow into deps for topo-sort.
-                    self.deps[f"_in_{k}"] = v
+                    # Suffix on the input key, not the target name, so two
+                    # inputs on the same Target stay distinguishable.
+                    self.register_dep(DepKind.INPUT, v, suffix=k)
                 elif isinstance(v, Ref):
                     self._inputs_raw[k] = v
                 elif isinstance(v, (str, Path)):

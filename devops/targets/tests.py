@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from devops.core.command import Command
-from devops.core.target import Artifact, Target
+from devops.core.target import Artifact, DepKind, Target
 from devops.targets.c_cpp import CCompile, ElfBinary, SourcesSpec, StaticLibrary, _resolve_sources
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ class GoogleTest(CCompile, TestTarget):
         linkable.extend(extra_libs)
         self.libs = tuple(linkable)
         # Implicit dep so `devops test Foo` also builds the thing being tested
-        self.deps[f"_tested_{target.name}"] = target
+        self.register_dep(DepKind.TESTED, target)
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / self.name
@@ -144,7 +144,7 @@ class Pytest(TestTarget):
         self.srcs = _resolve_sources(self.project.root, srcs)
         self._target = target
         if target is not None:
-            self.deps[f"_tested_{target.name}"] = target
+            self.register_dep(DepKind.TESTED, target)
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / ".pytest_stamp"

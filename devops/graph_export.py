@@ -1,14 +1,14 @@
 """Dependency-graph export: dot / json / text.
 
-Walks the registered Target graph (or a named subgraph) and emits it in
-one of three formats. Edges come from ``Target.deps`` — the key prefix
-(``_lib_``, ``_inc_``, ``_obj_``, ``_in_``, ``_install_``) recovers the
-relation kind the C/C++ / CustomArtifact / Install constructors used
-when they injected the dep. Remote refs in ``libs=`` / ``includes=``
-don't live in ``deps`` (they're resolved lazily), so we scan those
-attributes separately and represent each ref as either an opaque
-``RemoteRef`` node (default — no network) or, with
-``resolve_remotes=True``, a fully resolved remote Target.
+Walks the registered Target graph (or a named subgraph) and emits it
+in one of three formats. Edges come from ``Target.deps`` — the kind
+encoded into the key prefix (see ``DepKind`` in ``devops.core.target``)
+recovers the relation type the constructor used when injecting the
+dep. Remote refs in ``libs=`` / ``includes=`` don't live in ``deps``
+(they're resolved lazily), so we scan those attributes separately and
+represent each ref as either an opaque ``RemoteRef`` node (default —
+no network) or, with ``resolve_remotes=True``, a fully resolved
+remote Target.
 """
 
 from __future__ import annotations
@@ -18,20 +18,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from devops import registry
-from devops.core.target import Artifact, Target
+from devops.core.target import Artifact, Target, kind_from_dep_key
 from devops.remote import Ref, resolve_remote_ref
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
-
-
-EDGE_KIND_BY_PREFIX = {
-    "_lib_": "lib",
-    "_inc_": "include",
-    "_obj_": "obj",
-    "_in_": "input",
-    "_install_": "install",
-}
 
 
 @dataclass
@@ -61,10 +52,8 @@ class Graph:
 
 
 def _edge_kind_for(dep_key: str) -> str:
-    for prefix, kind in EDGE_KIND_BY_PREFIX.items():
-        if dep_key.startswith(prefix):
-            return kind
-    return "dep"
+    kind = kind_from_dep_key(dep_key)
+    return kind.value if kind is not None else "dep"
 
 
 def _target_node(t: Target, ctx: "BuildContext | None") -> Node:
