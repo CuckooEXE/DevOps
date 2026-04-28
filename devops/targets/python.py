@@ -66,6 +66,12 @@ class PythonWheel(Artifact):
             Command(
                 argv=python.invoke(["-m", "build", "--wheel", "--outdir", str(out_dir)]),
                 cwd=wheel_cwd,
+                # SOURCE_DATE_EPOCH=0 makes python -m build (and the
+                # underlying setuptools / hatchling / flit) bake a fixed
+                # epoch into the wheel's RECORD timestamps and zip
+                # entries — without it, every rebuild produces fresh
+                # bytes even when inputs are unchanged.
+                env=(("SOURCE_DATE_EPOCH", "0"),),
                 label=f"build wheel {self.name}",
                 inputs=(self.pyproject, *self.srcs),
                 outputs=(out_dir,),
@@ -448,6 +454,10 @@ class PythonShiv(Artifact):
         base_args: list[str] = [
             "-o", str(out),
             "-e", self.entry,
+            # Pin entry mtimes inside the .pyz so two builds with the
+            # same input bytes produce byte-identical zips. shiv has
+            # supported this since 1.0.0.
+            "--reproducible",
         ]
         if self.requirements and self.requirements.is_file():
             base_args.extend(["-r", str(self.requirements)])
@@ -460,6 +470,11 @@ class PythonShiv(Artifact):
         for w in dep_wheels:
             inputs.append(w.output_path(ctx))
 
+        # SOURCE_DATE_EPOCH belt-and-suspenders alongside --reproducible:
+        # any setuptools/hatchling builds shiv triggers transitively
+        # also pin their timestamps to this epoch.
+        env = (("SOURCE_DATE_EPOCH", "0"),)
+
         if dep_wheels:
             # Shell form so we can glob each dep wheel's `dist/*.whl`
             # without knowing versions at config time.
@@ -469,6 +484,7 @@ class PythonShiv(Artifact):
             cmd = Command.shell_cmd(
                 line,
                 cwd=self.pyproject.parent,
+                env=env,
                 label=f"shiv {self.name}",
                 inputs=tuple(inputs),
                 outputs=(out,),
@@ -477,6 +493,7 @@ class PythonShiv(Artifact):
             cmd = Command(
                 argv=shiv.invoke([*base_args, "."]),
                 cwd=self.pyproject.parent,
+                env=env,
                 label=f"shiv {self.name}",
                 inputs=tuple(inputs),
                 outputs=(out,),
