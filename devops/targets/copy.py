@@ -6,11 +6,17 @@ alongside compiled artifacts. Both accept either a filesystem path or
 another Artifact whose output_path resolves at build time.
 
 For arbitrary transformations, use CustomArtifact instead.
+
+Implementation: copies are performed by ``devops/targets/_copy_runner.py``
+invoked under ``sys.executable``. That keeps cp / mkdir / chmod / find
+off the required-tools list, sidesteps BSD-vs-GNU differences in those
+flags, and turns each copy step into an argv-form Command (cleaner
+cache key, cleaner dry-run output) instead of a shell pipeline.
 """
 
 from __future__ import annotations
 
-import shlex
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -104,20 +110,23 @@ class FileArtifact(Artifact):
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
         src = self._resolve_src(ctx)
         dst = self.output_path(ctx)
-        sq_src = shlex.quote(str(src))
-        sq_dst = shlex.quote(str(dst))
-        sq_parent = shlex.quote(str(dst.parent))
-        line = f"mkdir -p {sq_parent} && cp -p {sq_src} {sq_dst}"
+        argv: list[str] = [
+            sys.executable,
+            "-m", "devops.targets._copy_runner",
+            "file",
+            "--src", str(src),
+            "--dst", str(dst),
+        ]
         if self._mode is not None:
-            line += f" && chmod {self._mode} {sq_dst}"
+            argv.extend(["--chmod", self._mode])
         prelude = inline_ref_build_cmds(
             [self._src_spec] if isinstance(self._src_spec, Ref) else [],
             ctx,
         )
         return [
             *prelude,
-            Command.shell_cmd(
-                line,
+            Command(
+                argv=tuple(argv),
                 cwd=self.project.root,
                 label=f"copy {src.name} -> {self.name}",
                 inputs=(src, *self._extra_inputs),
@@ -247,32 +256,25 @@ class DirectoryArtifact(Artifact):
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
         src = self._resolve_src(ctx)
         dst = self.output_path(ctx)
-        sq_src = shlex.quote(str(src))
-        sq_dst = shlex.quote(str(dst))
-        sq_dst_parent = shlex.quote(str(dst.parent))
-        lines = [
-            "set -e",
-            f"rm -rf {sq_dst}",
-            f"mkdir -p {sq_dst_parent}",
-            f"mkdir -p {sq_dst}",
-            f"cp -a {sq_src}/. {sq_dst}/",
+        argv: list[str] = [
+            sys.executable,
+            "-m", "devops.targets._copy_runner",
+            "dir",
+            "--src", str(src),
+            "--dst", str(dst),
         ]
         if self._file_mode is not None:
-            lines.append(
-                f"find {sq_dst} -type f -exec chmod {self._file_mode} {{}} +"
-            )
+            argv.extend(["--file-mode", self._file_mode])
         if self._dir_mode is not None:
-            lines.append(
-                f"find {sq_dst} -type d -exec chmod {self._dir_mode} {{}} +"
-            )
+            argv.extend(["--dir-mode", self._dir_mode])
         prelude = inline_ref_build_cmds(
             [self._src_spec] if isinstance(self._src_spec, Ref) else [],
             ctx,
         )
         return [
             *prelude,
-            Command.shell_cmd(
-                "\n".join(lines),
+            Command(
+                argv=tuple(argv),
                 cwd=self.project.root,
                 label=f"copy dir {src.name} -> {self.name}",
                 inputs=(src, *self._tracked_files(ctx), *self._extra_inputs),
