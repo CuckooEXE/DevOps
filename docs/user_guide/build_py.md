@@ -11,8 +11,11 @@ Everything you need is re-exported from `builder`:
 ```python
 from builder import (
     ElfBinary, ElfSharedObject, StaticLibrary, HeadersOnly,
-    PythonWheel, SphinxDocs, Script,
-    GoogleTest, Pytest,
+    CObjectFile, LdBinary, CustomArtifact,
+    FileArtifact, DirectoryArtifact, CompressedArtifact, CompressionFormat,
+    PythonWheel, PythonApp, PythonShiv, SphinxDocs, Script,
+    GoogleTest, Pytest, Install,
+    GitRef, TarballRef, DirectoryRef,
     glob, COMMON_C_FLAGS, OptimizationLevel,
 )
 ```

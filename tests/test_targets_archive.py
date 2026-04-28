@@ -93,7 +93,7 @@ def test_rejects_dotdot_archive_path(tmp_project):
 def test_rejects_bad_entry_source_type(tmp_project):
     _, enter = tmp_project
     with enter():
-        with pytest.raises(TypeError, match="source"):
+        with pytest.raises(TypeError, match="entries"):
             CompressedArtifact(
                 name="x",
                 format=CompressionFormat.TarGzip,

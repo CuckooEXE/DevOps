@@ -24,7 +24,7 @@ from devops.core.command import Command
 from devops.core.target import Artifact, DepKind, Target
 from devops.remote import Ref
 from devops.targets._paths import validate_octal_mode, validate_relative_path
-from devops.targets._specs import inline_ref_build_cmds, resolve_target_spec
+from devops.targets._specs import coerce_source, ref_prelude_for
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -62,53 +62,26 @@ class FileArtifact(Artifact):
             extra_inputs=extra_inputs, required_tools=required_tools,
         )
         ident = f"FileArtifact({name!r})"
-        # Stored shapes:
-        #   _src_path: Path           — for raw filesystem srcs
-        #   _src_spec: Target | Ref   — resolved at build time
-        self._src_path: Path | None = None
-        self._src_spec: "Target | Ref | None" = None
-        if isinstance(src, Artifact):
-            self._src_spec = src
-            self.register_dep(DepKind.COPY, src)
-        elif isinstance(src, Ref):
-            self._src_spec = src  # remote — resolved at build time
-        elif isinstance(src, (str, Path)):
-            p = Path(src)
-            if not p.is_absolute():
-                p = (self.project.root / p).resolve()
-            self._src_path = p
-        else:
-            raise TypeError(
-                f"{ident}: src must be str, Path, Artifact, or Ref; "
-                f"got {type(src).__name__}"
-            )
         if dest is not None:
             validate_relative_path(dest, "dest", ident)
         validate_octal_mode(mode, "mode", ident)
+        self._src = coerce_source(
+            src, kwarg="src", ident=ident,
+            project_root=self.project.root,
+            deps=self.deps, dep_kind=DepKind.COPY,
+        )
         self._dest = dest
         self._mode = mode
 
-    def _resolve_src(self, ctx: "BuildContext") -> Path:
-        if self._src_spec is not None:
-            target = resolve_target_spec(
-                self._src_spec,
-                kwarg="src", ident=f"FileArtifact({self.name!r})",
-            )
-            if not isinstance(target, Artifact):
-                raise TypeError(
-                    f"FileArtifact({self.name!r}): src resolved to "
-                    f"{type(target).__name__}, expected an Artifact"
-                )
-            return target.output_path(ctx)
-        assert self._src_path is not None
-        return self._src_path
-
     def output_path(self, ctx: "BuildContext") -> Path:
-        dest_name = self._dest or self._resolve_src(ctx).name
+        dest_name = self._dest or self._src.resolve(
+            ctx, kwarg="src", ident=f"FileArtifact({self.name!r})",
+        ).name
         return self.output_dir(ctx) / dest_name
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
-        src = self._resolve_src(ctx)
+        ident = f"FileArtifact({self.name!r})"
+        src = self._src.resolve(ctx, kwarg="src", ident=ident)
         dst = self.output_path(ctx)
         argv: list[str] = [
             sys.executable,
@@ -119,12 +92,8 @@ class FileArtifact(Artifact):
         ]
         if self._mode is not None:
             argv.extend(["--chmod", self._mode])
-        prelude = inline_ref_build_cmds(
-            [self._src_spec] if isinstance(self._src_spec, Ref) else [],
-            ctx,
-        )
         return [
-            *prelude,
+            *ref_prelude_for([self._src], ctx),
             Command(
                 argv=tuple(argv),
                 cwd=self.project.root,
@@ -135,17 +104,9 @@ class FileArtifact(Artifact):
         ]
 
     def describe(self) -> str:
-        if self._src_path is not None:
-            src_str = str(self._src_path)
-        elif isinstance(self._src_spec, Target):
-            src_str = self._src_spec.qualified_name
-        elif isinstance(self._src_spec, Ref):
-            src_str = self._src_spec.to_spec()
-        else:
-            src_str = "?"
         return (
             f"FileArtifact {self.qualified_name} ({self.arch})\n"
-            f"  src:  {src_str}\n"
+            f"  src:  {self._src.describe_str()}\n"
             f"  dest: {self._dest or '(basename of src)'}"
         )
 
@@ -195,31 +156,24 @@ class DirectoryArtifact(Artifact):
             extra_inputs=extra_inputs, required_tools=required_tools,
         )
         ident = f"DirectoryArtifact({name!r})"
-        self._src_path: Path | None = None
-        self._src_spec: "Target | Ref | None" = None
-        if isinstance(src, Artifact):
-            self._src_spec = src
-            self.register_dep(DepKind.COPY, src)
-        elif isinstance(src, Ref):
-            self._src_spec = src
-        elif isinstance(src, (str, Path)):
-            p = Path(src)
-            if not p.is_absolute():
-                p = (self.project.root / p).resolve()
-            if not p.exists():
-                raise FileNotFoundError(f"{ident}: src={p} does not exist")
-            if not p.is_dir():
-                raise NotADirectoryError(f"{ident}: src={p} is not a directory")
-            self._src_path = p
-        else:
-            raise TypeError(
-                f"{ident}: src must be str, Path, Artifact, or Ref; "
-                f"got {type(src).__name__}"
-            )
         if dest is not None:
             validate_relative_path(dest, "dest", ident)
         validate_octal_mode(file_mode, "file_mode", ident)
         validate_octal_mode(dir_mode, "dir_mode", ident)
+        self._src = coerce_source(
+            src, kwarg="src", ident=ident,
+            project_root=self.project.root,
+            deps=self.deps, dep_kind=DepKind.COPY,
+        )
+        # For raw filesystem sources, validate at config time that the
+        # path is a directory — Target/Ref sources can't be inspected
+        # yet because they materialize at build time.
+        if self._src.path is not None:
+            p = self._src.path
+            if not p.exists():
+                raise FileNotFoundError(f"{ident}: src={p} does not exist")
+            if not p.is_dir():
+                raise NotADirectoryError(f"{ident}: src={p} is not a directory")
         self._dest = dest
         self._file_mode = file_mode
         self._dir_mode = dir_mode
@@ -227,34 +181,21 @@ class DirectoryArtifact(Artifact):
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / (self._dest or self.name)
 
-    def _resolve_src(self, ctx: "BuildContext") -> Path:
-        if self._src_spec is not None:
-            target = resolve_target_spec(
-                self._src_spec,
-                kwarg="src", ident=f"DirectoryArtifact({self.name!r})",
-            )
-            if not isinstance(target, Artifact):
-                raise TypeError(
-                    f"DirectoryArtifact({self.name!r}): src resolved to "
-                    f"{type(target).__name__}, expected an Artifact"
-                )
-            return target.output_path(ctx)
-        assert self._src_path is not None
-        return self._src_path
-
     def _tracked_files(self, ctx: "BuildContext") -> list[Path]:
         """Every regular file under the resolved src — folded into
         Command.inputs so edits invalidate the cache. For Target/Ref
         sources the upstream's output may not yet exist at build_cmds
         time; the upstream's own stamp covers internal change."""
-        src = self._resolve_src(ctx) if self._src_spec is not None else self._src_path
-        assert src is not None
+        src = self._src.resolve(
+            ctx, kwarg="src", ident=f"DirectoryArtifact({self.name!r})",
+        )
         if not src.is_dir():
             return []
         return sorted(p for p in src.rglob("*") if p.is_file())
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
-        src = self._resolve_src(ctx)
+        ident = f"DirectoryArtifact({self.name!r})"
+        src = self._src.resolve(ctx, kwarg="src", ident=ident)
         dst = self.output_path(ctx)
         argv: list[str] = [
             sys.executable,
@@ -267,12 +208,8 @@ class DirectoryArtifact(Artifact):
             argv.extend(["--file-mode", self._file_mode])
         if self._dir_mode is not None:
             argv.extend(["--dir-mode", self._dir_mode])
-        prelude = inline_ref_build_cmds(
-            [self._src_spec] if isinstance(self._src_spec, Ref) else [],
-            ctx,
-        )
         return [
-            *prelude,
+            *ref_prelude_for([self._src], ctx),
             Command(
                 argv=tuple(argv),
                 cwd=self.project.root,
@@ -283,16 +220,8 @@ class DirectoryArtifact(Artifact):
         ]
 
     def describe(self) -> str:
-        if self._src_path is not None:
-            src_str = str(self._src_path)
-        elif isinstance(self._src_spec, Target):
-            src_str = self._src_spec.qualified_name
-        elif isinstance(self._src_spec, Ref):
-            src_str = self._src_spec.to_spec()
-        else:
-            src_str = "?"
         return (
             f"DirectoryArtifact {self.qualified_name} ({self.arch})\n"
-            f"  src:  {src_str}\n"
+            f"  src:  {self._src.describe_str()}\n"
             f"  dest: {self._dest or self.name}"
         )

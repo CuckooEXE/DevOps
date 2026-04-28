@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 from devops.core.command import Command
 from devops.core.target import Artifact, DepKind, Target, _TargetView
 from devops.remote import Ref
-from devops.targets._specs import inline_ref_build_cmds, resolve_target_spec
+from devops.targets._specs import ResolvedSource, coerce_source, ref_prelude_for
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -64,27 +64,19 @@ class CustomArtifact(Artifact):
 
         self.outputs_rel: list[str] = list(outputs)
         self.cmd_templates: list[str] = list(cmds)
-        # Each value resolved later: Target/Ref → Target view, Path → str.
-        self._inputs_raw: dict[str, "Target | Ref | Path"] = {}
+        # Each input parsed once at config time; resolved per-build via
+        # ResolvedSource.resolve / .resolve_target. Suffix on the input
+        # key, not the target name, so two inputs on the same Target
+        # stay distinguishable in the deps dict.
+        self._inputs: dict[str, ResolvedSource] = {}
         if inputs:
             for k, v in inputs.items():
-                if isinstance(v, Target):
-                    self._inputs_raw[k] = v
-                    # Suffix on the input key, not the target name, so two
-                    # inputs on the same Target stay distinguishable.
-                    self.register_dep(DepKind.INPUT, v, suffix=k)
-                elif isinstance(v, Ref):
-                    self._inputs_raw[k] = v
-                elif isinstance(v, (str, Path)):
-                    p = Path(v)
-                    if not p.is_absolute():
-                        p = (self.project.root / p).resolve()
-                    self._inputs_raw[k] = p
-                else:
-                    raise TypeError(
-                        f"CustomArtifact({name!r}): input {k!r} must be "
-                        f"Target, Ref, str, or Path; got {type(v).__name__}"
-                    )
+                self._inputs[k] = coerce_source(
+                    v, kwarg=f"inputs[{k!r}]",
+                    ident=f"CustomArtifact({name!r})",
+                    project_root=self.project.root,
+                    deps=self.deps, dep_kind=DepKind.INPUT, dep_suffix=k,
+                )
 
     def output_path(self, ctx: "BuildContext") -> Path:
         return self.output_dir(ctx) / self.outputs_rel[0]
@@ -92,34 +84,22 @@ class CustomArtifact(Artifact):
     def output_paths(self, ctx: "BuildContext") -> list[Path]:
         return [self.output_dir(ctx) / o for o in self.outputs_rel]
 
-    def inputs_for(self, ctx: "BuildContext") -> dict[str, Path | Target]:
-        return dict(self._inputs_raw)
-
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
-        prelude = inline_ref_build_cmds(
-            [v for v in self._inputs_raw.values() if isinstance(v, Ref)],
-            ctx,
-        )
         bindings: dict[str, object] = {}
         input_paths: list[Path] = []
-        for key, val in self._inputs_raw.items():
-            if isinstance(val, Ref):
-                # Resolve at build_cmds time so the network/cache fetch
-                # only fires when the input is actually needed.
-                target = resolve_target_spec(
-                    val, kwarg=f"inputs[{key!r}]",
-                    ident=f"CustomArtifact({self.name!r})",
-                )
-                bindings[key] = _TargetView(target, ctx)
-                if isinstance(target, Artifact):
-                    input_paths.append(target.output_path(ctx))
-            elif isinstance(val, Target):
-                bindings[key] = _TargetView(val, ctx)
-                if isinstance(val, Artifact):
-                    input_paths.append(val.output_path(ctx))
+        for key, source in self._inputs.items():
+            tgt = source.resolve_target()
+            if tgt is None:
+                # Path source: bind the absolute path string for templates.
+                assert source.path is not None
+                bindings[key] = str(source.path)
+                input_paths.append(source.path)
             else:
-                bindings[key] = str(val)
-                input_paths.append(val)
+                # Target/Ref: bind a _TargetView so templates can read
+                # {key.output_path}, {key.name}, etc.
+                bindings[key] = _TargetView(tgt, ctx)
+                if isinstance(tgt, Artifact):
+                    input_paths.append(tgt.output_path(ctx))
 
         out_paths = self.output_paths(ctx)
         bindings["out"] = [str(p) for p in out_paths]
@@ -139,7 +119,7 @@ class CustomArtifact(Artifact):
         joined = "\n".join(["set -e", mkdir, *rendered])
 
         return [
-            *prelude,
+            *ref_prelude_for(self._inputs.values(), ctx),
             Command.shell_cmd(
                 joined,
                 cwd=self.project.root,
@@ -150,14 +130,9 @@ class CustomArtifact(Artifact):
         ]
 
     def describe(self) -> str:
-        def _fmt(v: "Target | Ref | Path") -> str:
-            if isinstance(v, Target):
-                return v.qualified_name
-            if isinstance(v, Ref):
-                return v.to_spec()
-            return str(v)
-
-        ins = ", ".join(f"{k}={_fmt(v)}" for k, v in self._inputs_raw.items()) or "-"
+        ins = ", ".join(
+            f"{k}={s.describe_str()}" for k, s in self._inputs.items()
+        ) or "-"
         return (
             f"CustomArtifact {self.qualified_name} ({self.arch})\n"
             f"  inputs:  {ins}\n"

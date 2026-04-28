@@ -40,7 +40,7 @@ from devops.core.command import Command
 from devops.core.target import Artifact, DepKind, Target
 from devops.remote import Ref
 from devops.targets._paths import validate_relative_path
-from devops.targets._specs import inline_ref_build_cmds, resolve_target_spec
+from devops.targets._specs import ResolvedSource, coerce_source, ref_prelude_for
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -109,62 +109,36 @@ class CompressedArtifact(Artifact):
         )
         self.format = format
         self._archive_name = archive_name
-        # Each entry stored as Path (literal fs source) or Target/Ref
-        # (resolved at build_cmds time).
-        self._entries: dict[str, "Path | Target | Ref"] = {}
+        self._entries: dict[str, ResolvedSource] = {}
         for i, (archive_path, src) in enumerate(entries.items()):
             validate_relative_path(archive_path, "entries key", ident)
-            if isinstance(src, Artifact):
-                self._entries[archive_path] = src
+            resolved = coerce_source(
+                src, kwarg=f"entries[{archive_path!r}]", ident=ident,
+                project_root=self.project.root,
+                deps=self.deps, dep_kind=DepKind.ARCHIVE,
                 # Index suffix keeps multiple artifact-typed entries
                 # with the same target.name distinguishable.
-                self.register_dep(DepKind.ARCHIVE, src, suffix=str(i))
-            elif isinstance(src, Ref):
-                self._entries[archive_path] = src
-            elif isinstance(src, (str, Path)):
-                p = Path(src)
-                if not p.is_absolute():
-                    p = (self.project.root / p).resolve()
-                # Best-effort config-time check for gzip — Target/Ref
-                # sources resolve later, so the runner repeats this
-                # check at build time.
-                if (
-                    format == CompressionFormat.Gzip
-                    and p.exists()
-                    and not p.is_file()
-                ):
-                    kind = "directory" if p.is_dir() else "special"
-                    raise ValueError(
-                        f"{ident}: Gzip source must be a regular file; "
-                        f"got {p} ({kind})"
-                    )
-                self._entries[archive_path] = p
-            else:
-                raise TypeError(
-                    f"{ident} entry {archive_path!r}: source must be "
-                    f"str, Path, Artifact, or Ref; "
-                    f"got {type(src).__name__}"
+                dep_suffix=str(i),
+            )
+            # Best-effort config-time check for gzip — Target/Ref
+            # sources resolve later, so the runner repeats this check
+            # at build time.
+            if (
+                format == CompressionFormat.Gzip
+                and resolved.path is not None
+                and resolved.path.exists()
+                and not resolved.path.is_file()
+            ):
+                kind = "directory" if resolved.path.is_dir() else "special"
+                raise ValueError(
+                    f"{ident}: Gzip source must be a regular file; "
+                    f"got {resolved.path} ({kind})"
                 )
+            self._entries[archive_path] = resolved
 
     def output_path(self, ctx: "BuildContext") -> Path:
         base = self._archive_name or self.name
         return self.output_dir(ctx) / f"{base}{_EXT[self.format]}"
-
-    def _resolve_entry(
-        self, src: "Path | Target | Ref", ctx: "BuildContext"
-    ) -> Path:
-        if isinstance(src, Path):
-            return src
-        target = resolve_target_spec(
-            src,
-            kwarg="entries", ident=f"CompressedArtifact({self.name!r})",
-        )
-        if not isinstance(target, Artifact):
-            raise TypeError(
-                f"CompressedArtifact({self.name!r}): entry resolved to "
-                f"{type(target).__name__}, expected an Artifact"
-            )
-        return target.output_path(ctx)
 
     def _config_inputs(self) -> list[Path]:
         """Walk path-typed sources at config time so edits to any contained
@@ -172,40 +146,38 @@ class CompressedArtifact(Artifact):
         their resolved ``output_path`` — the upstream's stamp covers
         internal change."""
         out: list[Path] = []
-        for src in self._entries.values():
-            if isinstance(src, Path):
-                if src.is_dir():
-                    out.extend(sorted(p for p in src.rglob("*") if p.is_file()))
-                else:
-                    out.append(src)
+        for s in self._entries.values():
+            if s.path is None:
+                continue
+            if s.path.is_dir():
+                out.extend(sorted(p for p in s.path.rglob("*") if p.is_file()))
+            else:
+                out.append(s.path)
         return out
 
     def _artifact_paths(self, ctx: "BuildContext") -> list[Path]:
-        out: list[Path] = []
-        for src in self._entries.values():
-            if isinstance(src, Path):
-                continue
-            out.append(self._resolve_entry(src, ctx))
-        return out
+        ident = f"CompressedArtifact({self.name!r})"
+        return [
+            s.resolve(ctx, kwarg="entries", ident=ident)
+            for s in self._entries.values()
+            if s.path is None
+        ]
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        ident = f"CompressedArtifact({self.name!r})"
         out_path = self.output_path(ctx)
-        prelude = inline_ref_build_cmds(
-            [src for src in self._entries.values() if isinstance(src, Ref)],
-            ctx,
-        )
         argv: list[str] = [
             sys.executable,
             "-m", "devops.targets._archive_runner",
             "--format", self.format.value,
             "--output", str(out_path),
         ]
-        for archive_path, src in self._entries.items():
-            src_path = self._resolve_entry(src, ctx)
+        for archive_path, s in self._entries.items():
+            src_path = s.resolve(ctx, kwarg="entries", ident=ident)
             argv.extend(["--entry", archive_path, str(src_path)])
 
         return [
-            *prelude,
+            *ref_prelude_for(self._entries.values(), ctx),
             Command(
                 argv=tuple(argv),
                 cwd=self.project.root,
@@ -217,12 +189,10 @@ class CompressedArtifact(Artifact):
         ]
 
     def describe(self) -> str:
-        rows = []
-        for ap, src in self._entries.items():
-            if isinstance(src, Artifact):
-                rows.append(f"    {ap} <- {src.qualified_name}")
-            else:
-                rows.append(f"    {ap} <- {src}")
+        rows = [
+            f"    {ap} <- {s.describe_str()}"
+            for ap, s in self._entries.items()
+        ]
         body = "\n".join(rows) if rows else "    (none)"
         return (
             f"CompressedArtifact {self.qualified_name} ({self.arch})\n"

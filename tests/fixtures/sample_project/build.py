@@ -6,10 +6,14 @@ from pathlib import Path
 from builder import (
     COMMON_C_FLAGS,
     CObjectFile,
+    CompressedArtifact,
+    CompressionFormat,
     CustomArtifact,
+    DirectoryArtifact,
     DirectoryRef,
     ElfBinary,
     ElfSharedObject,
+    FileArtifact,
     GoogleTest,
     HeadersOnly,
     Install,
@@ -287,6 +291,49 @@ CustomArtifact(
     cmds=["size {bin.output_path} > {out[0]}"],
     required_tools=["size"],
     doc="Runs `size` on MyCoolApp and captures the per-section byte counts.",
+)
+
+
+# ---------------------------------------------------------------------------
+# FileArtifact / DirectoryArtifact / CompressedArtifact — ship non-built
+# content alongside compiled output. These three target types use
+# Python-helper runners (no tar/cp/find/zip required on PATH) and
+# produce byte-reproducible archives.
+# ---------------------------------------------------------------------------
+
+# Single-file copy, with an explicit rename + chmod.
+defaultConf = FileArtifact(
+    name="default_conf",
+    src="etc/myapp.conf",
+    dest="config/app.conf",
+    mode="0644",
+    doc="Stage etc/myapp.conf under build/.../default_conf/config/app.conf.",
+)
+
+# Directory tree copy. cp -a semantics with optional file/dir mode overrides.
+assets = DirectoryArtifact(
+    name="assets",
+    src="assets",
+    file_mode="0644",
+    dir_mode="0755",
+    doc="Recursive copy of the assets/ tree, normalizing modes to 0644/0755.",
+)
+
+# Release tarball — composes Artifact / file / directory entries into one
+# archive. Format options: CompressionFormat.{Gzip,TarGzip,Zip}. Output is
+# byte-reproducible (gzip mtime=0, tar metadata zeroed, zip DOS epoch).
+CompressedArtifact(
+    name="release",
+    format=CompressionFormat.TarGzip,
+    archive_name="MyCoolApp-1.0",
+    entries={
+        "bin/MyCoolApp":     myCoolApp,        # Artifact source
+        "lib/libMyCoolLib":  myLib,            # another Artifact
+        "include":           headers,          # HeadersOnly → directory
+        "config/app.conf":   "etc/myapp.conf", # raw file path
+        "share/assets":      assets,           # DirectoryArtifact source
+    },
+    doc="Self-contained .tar.gz bundling MyCoolApp + its deps + config + assets.",
 )
 
 
