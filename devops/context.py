@@ -180,7 +180,6 @@ class BuildContext:
     workspace_root: Path
     build_dir: Path
     profile: OptimizationLevel = OptimizationLevel.Debug
-    jobs: int = 1
     verbose: bool = False
     dry_run: bool = False
     # Primary toolchain — kept for back-compat; equivalent to toolchains[HOST_ARCH].
