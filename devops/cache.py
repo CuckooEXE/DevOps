@@ -101,11 +101,23 @@ def _current_hash(cmd: Command) -> str:
     return h.hexdigest()
 
 
+def _output_present(o: Path) -> bool:
+    """An output is "present" if it's a regular file that exists, or a
+    non-empty directory. An empty directory doesn't count — a wiped
+    PythonWheel output dir or a freshly-created CObjectFile obj/ would
+    otherwise let ``is_fresh`` claim a freshness it can't deliver."""
+    if o.is_file():
+        return True
+    if o.is_dir():
+        return next(o.iterdir(), None) is not None
+    return False
+
+
 def is_fresh(cmd: Command) -> bool:
     stamp = _stamp_path(cmd)
     if stamp is None or not stamp.is_file():
         return False
-    if not all(o.exists() for o in cmd.outputs):
+    if not all(_output_present(o) for o in cmd.outputs):
         return False
     return stamp.read_text().strip() == _current_hash(cmd)
 
