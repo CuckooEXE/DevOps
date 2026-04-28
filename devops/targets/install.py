@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from devops.core.command import Command
 from devops.core.target import Artifact, Target
+from devops.remote import Ref
+from devops.targets._specs import resolve_target_spec
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -28,8 +30,13 @@ class Install(Target):
 
     Args:
         name:     unique target name
-        artifact: the Artifact to install (must already be registered)
-        dest:     destination directory (ignored for PythonWheel)
+        artifact: the Artifact to install (must already be registered),
+                  or a Ref pointing at one in a remote project. For a
+                  Ref the type-based dispatch (PythonWheel / ElfBinary /
+                  HeadersOnly / etc.) is deferred to ``install_cmds``.
+        dest:     destination directory (ignored for PythonWheel). Required
+                  unless ``artifact`` is a PythonWheel; for a Ref we can't
+                  know the type yet, so dest is checked at install time.
         mode:     file mode for `install -m` on binaries/libs. Default "0755".
         sudo:     prefix `sudo ` on install commands (pip is run as-is)
         pip_args: extra arguments passed to `pip install` for PythonWheels.
@@ -41,7 +48,7 @@ class Install(Target):
     def __init__(
         self,
         name: str,
-        artifact: Artifact,
+        artifact: "Artifact | Ref",
         dest: str | Path | None = None,
         mode: str = "0755",
         sudo: bool = False,
@@ -50,27 +57,64 @@ class Install(Target):
     ) -> None:
         from devops.targets.python import PythonWheel
 
-        if not isinstance(artifact, Artifact):
-            raise TypeError(f"Install.artifact must be an Artifact, got {type(artifact).__name__}")
-        if not isinstance(artifact, PythonWheel) and dest is None:
-            raise ValueError(f"Install({name!r}): dest= required for {type(artifact).__name__}")
+        if isinstance(artifact, Artifact):
+            if not isinstance(artifact, PythonWheel) and dest is None:
+                raise ValueError(
+                    f"Install({name!r}): dest= required for "
+                    f"{type(artifact).__name__}"
+                )
+            deps = {f"_install_{artifact.name}": artifact}
+        elif isinstance(artifact, Ref):
+            # Type-based dest validation deferred — we resolve at install_cmds.
+            deps = {}
+        else:
+            raise TypeError(
+                f"Install.artifact must be Artifact or Ref, "
+                f"got {type(artifact).__name__}"
+            )
 
-        super().__init__(
-            name=name,
-            deps={f"_install_{artifact.name}": artifact},
-            doc=doc,
-        )
-        self.artifact = artifact
+        super().__init__(name=name, deps=deps, doc=doc)
+        self._artifact_spec: "Artifact | Ref" = artifact
         self.dest: Path | None = Path(dest) if dest is not None else None
         self.mode = mode
         self.sudo = sudo
         self.pip_args = tuple(pip_args)
 
+    @property
+    def artifact(self) -> Artifact:
+        """Eagerly-bound artifact when one was passed; otherwise raises.
+
+        For a Ref-typed Install, use ``_resolve_artifact`` from
+        install_cmds to defer the (possibly-network-backed) resolution.
+        """
+        if isinstance(self._artifact_spec, Artifact):
+            return self._artifact_spec
+        raise RuntimeError(
+            f"Install({self.name!r}): artifact is a Ref; resolve via "
+            f"install_cmds (BuildContext required)"
+        )
+
+    def _resolve_artifact(self) -> Artifact:
+        target = resolve_target_spec(
+            self._artifact_spec,
+            kwarg="artifact", ident=f"Install({self.name!r})",
+        )
+        if not isinstance(target, Artifact):
+            raise TypeError(
+                f"Install({self.name!r}): artifact resolved to "
+                f"{type(target).__name__}, expected an Artifact"
+            )
+        return target
+
     def describe(self) -> str:
         dest_str = str(self.dest) if self.dest else "(pip)"
+        if isinstance(self._artifact_spec, Artifact):
+            artifact_str = self._artifact_spec.qualified_name
+        else:
+            artifact_str = self._artifact_spec.to_spec()
         return (
             f"Install {self.qualified_name}\n"
-            f"  artifact: {self.artifact.qualified_name}\n"
+            f"  artifact: {artifact_str}\n"
             f"  dest:     {dest_str}\n"
             f"  mode:     {self.mode}"
         )
@@ -84,13 +128,17 @@ class Install(Target):
         )
         from devops.targets.python import PythonWheel
 
-        a = self.artifact
+        a = self._resolve_artifact()
         src = a.output_path(ctx)
 
         if isinstance(a, PythonWheel):
             return self._pip_install_cmds(ctx, src)
 
-        assert self.dest is not None  # ensured in __init__
+        if self.dest is None:
+            raise ValueError(
+                f"Install({self.name!r}): dest= required for "
+                f"{type(a).__name__}"
+            )
 
         if isinstance(a, ElfSharedObject):
             filename = f"lib{a.name}.so"

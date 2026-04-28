@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING
 
 from devops.core.command import Command
 from devops.core.target import Artifact, Target, _TargetView
+from devops.remote import Ref
+from devops.targets._specs import inline_ref_build_cmds, resolve_target_spec
 
 if TYPE_CHECKING:
     from devops.context import BuildContext
@@ -43,7 +45,7 @@ class CustomArtifact(Artifact):
         name: str,
         outputs: list[str],
         cmds: list[str],
-        inputs: dict[str, Target | str | Path] | None = None,
+        inputs: "dict[str, Target | Ref | str | Path] | None" = None,
         version: str | None = None,
         deps: dict[str, Target] | None = None,
         doc: str | None = None,
@@ -62,13 +64,16 @@ class CustomArtifact(Artifact):
 
         self.outputs_rel: list[str] = list(outputs)
         self.cmd_templates: list[str] = list(cmds)
-        self._inputs_raw: dict[str, Target | Path] = {}
+        # Each value resolved later: Target/Ref → Target view, Path → str.
+        self._inputs_raw: dict[str, "Target | Ref | Path"] = {}
         if inputs:
             for k, v in inputs.items():
                 if isinstance(v, Target):
                     self._inputs_raw[k] = v
                     # Target inputs flow into deps for topo-sort.
                     self.deps[f"_in_{k}"] = v
+                elif isinstance(v, Ref):
+                    self._inputs_raw[k] = v
                 elif isinstance(v, (str, Path)):
                     p = Path(v)
                     if not p.is_absolute():
@@ -76,8 +81,8 @@ class CustomArtifact(Artifact):
                     self._inputs_raw[k] = p
                 else:
                     raise TypeError(
-                        f"CustomArtifact({name!r}): input {k!r} must be Target, str, or Path; "
-                        f"got {type(v).__name__}"
+                        f"CustomArtifact({name!r}): input {k!r} must be "
+                        f"Target, Ref, str, or Path; got {type(v).__name__}"
                     )
 
     def output_path(self, ctx: "BuildContext") -> Path:
@@ -90,10 +95,24 @@ class CustomArtifact(Artifact):
         return dict(self._inputs_raw)
 
     def build_cmds(self, ctx: "BuildContext") -> list[Command]:
+        prelude = inline_ref_build_cmds(
+            [v for v in self._inputs_raw.values() if isinstance(v, Ref)],
+            ctx,
+        )
         bindings: dict[str, object] = {}
         input_paths: list[Path] = []
         for key, val in self._inputs_raw.items():
-            if isinstance(val, Target):
+            if isinstance(val, Ref):
+                # Resolve at build_cmds time so the network/cache fetch
+                # only fires when the input is actually needed.
+                target = resolve_target_spec(
+                    val, kwarg=f"inputs[{key!r}]",
+                    ident=f"CustomArtifact({self.name!r})",
+                )
+                bindings[key] = _TargetView(target, ctx)
+                if isinstance(target, Artifact):
+                    input_paths.append(target.output_path(ctx))
+            elif isinstance(val, Target):
                 bindings[key] = _TargetView(val, ctx)
                 if isinstance(val, Artifact):
                     input_paths.append(val.output_path(ctx))
@@ -119,20 +138,25 @@ class CustomArtifact(Artifact):
         joined = "\n".join(["set -e", mkdir, *rendered])
 
         return [
+            *prelude,
             Command.shell_cmd(
                 joined,
                 cwd=self.project.root,
                 label=self.name,
                 inputs=(*input_paths, *self._extra_inputs),
                 outputs=tuple(out_paths),
-            )
+            ),
         ]
 
     def describe(self) -> str:
-        ins = ", ".join(
-            f"{k}={v.qualified_name if isinstance(v, Target) else v}"
-            for k, v in self._inputs_raw.items()
-        ) or "-"
+        def _fmt(v: "Target | Ref | Path") -> str:
+            if isinstance(v, Target):
+                return v.qualified_name
+            if isinstance(v, Ref):
+                return v.to_spec()
+            return str(v)
+
+        ins = ", ".join(f"{k}={_fmt(v)}" for k, v in self._inputs_raw.items()) or "-"
         return (
             f"CustomArtifact {self.qualified_name} ({self.arch})\n"
             f"  inputs:  {ins}\n"
