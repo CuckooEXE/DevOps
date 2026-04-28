@@ -140,6 +140,46 @@ def _resolve(name: str, *, current: Project | None = None) -> Target:
         raise typer.Exit(1)
 
 
+def _resolve_spec(
+    spec: str,
+    *,
+    profile: OptimizationLevel = OptimizationLevel.Debug,
+    verbose: bool = False,
+    dry_run: bool = False,
+) -> tuple[Target, BuildContext]:
+    """Resolve a target name OR a remote spec to a (Target, BuildContext) pair.
+
+    Centralizes the dispatch between local-workspace targets and remote
+    Refs (``git+...::name``, ``file://...::name``, etc.) so build/run
+    don't each implement it. For remote specs, fetches the source and
+    builds an ad-hoc context that points at the remote project; for
+    local names, runs the standard workspace prepare and registry
+    lookup.
+    """
+    from devops import remote_run
+
+    ref = remote_run.parse_spec(spec)
+    if ref is not None:
+        _, t = remote_run.resolve(spec)
+        ctx = remote_run.adhoc_context(
+            t, ref, profile=profile, verbose=verbose, dry_run=dry_run,
+        )
+        return t, ctx
+
+    ctx = _prepare(profile=profile, verbose=verbose, dry_run=dry_run)
+    t = _resolve(spec)
+    return t, ctx
+
+
+def _require_artifact(t: Target, name: str) -> Artifact:
+    if not isinstance(t, Artifact):
+        typer.echo(
+            f"error: {name} is a {type(t).__name__}, not an Artifact", err=True,
+        )
+        raise typer.Exit(1)
+    return t
+
+
 def _run_commands(cmds: list[Command], ctx: BuildContext) -> None:
     try:
         runner.run_all(cmds, verbose=ctx.verbose, dry_run=ctx.dry_run)
@@ -179,24 +219,23 @@ def describe(names: list[str] = typer.Argument(None, autocompletion=_complete_an
     """
     from devops import remote_run
 
-    # If any name is a remote spec, resolve those against their source
-    # rather than the local workspace.
-    if names and any(remote_run.parse_spec(n) is not None for n in names):
-        for n in names:
-            ref = remote_run.parse_spec(n)
-            if ref is None:
-                _prepare()  # lazy — only if we hit a local name
-                _print_target(_resolve(n))
-                continue
-            _, t = remote_run.resolve(n)
+    if not names:
+        _prepare()
+        for t in registry.all_targets():
             _print_target(t)
         return
 
-    _prepare()
-    targets = registry.all_targets()
-    if names:
-        targets = [_resolve(n) for n in names]
-    for t in targets:
+    # _prepare() resets the registry, so call it once if any name is
+    # local — calling per-iteration would wipe earlier resolutions.
+    if any(remote_run.parse_spec(n) is None for n in names):
+        _prepare()
+
+    for n in names:
+        ref = remote_run.parse_spec(n)
+        if ref is not None:
+            _, t = remote_run.resolve(n)
+        else:
+            t = _resolve(n)
         _print_target(t)
 
 
@@ -212,26 +251,10 @@ def build(
     ``git+ssh://host/repo[@ref]::Target`` — the remote source is
     cloned/fetched and built in place.
     """
-    from devops import remote_run
-
-    ref = remote_run.parse_spec(name)
-    if ref is not None:
-        _, t = remote_run.resolve(name)
-        if not isinstance(t, Artifact):
-            typer.echo(f"error: {name} is a {type(t).__name__}, not an Artifact", err=True)
-            raise typer.Exit(1)
-        ctx = remote_run.adhoc_context(t, ref, profile=profile, verbose=verbose)
-        _build_transitively(t, ctx)
-        typer.echo(f"built: {t.output_path(ctx)}")
-        return
-
-    ctx = _prepare(profile=profile, verbose=verbose)
-    t = _resolve(name)
-    if not isinstance(t, Artifact):
-        typer.echo(f"error: {name} is a {type(t).__name__}, not an Artifact", err=True)
-        raise typer.Exit(1)
-    _build_transitively(t, ctx)
-    typer.echo(f"built: {t.output_path(ctx)}")
+    t, ctx = _resolve_spec(name, profile=profile, verbose=verbose)
+    artifact = _require_artifact(t, name)
+    _build_transitively(artifact, ctx)
+    typer.echo(f"built: {artifact.output_path(ctx)}")
 
 
 def _exec_artifact(t: Artifact, ctx: BuildContext, args: list[str], cwd: Path) -> None:
@@ -263,31 +286,12 @@ def run(
 
         devops run git+ssh://host/acme/tools::mycli -- --flag=val
     """
-    from devops import remote_run
-
     user_cwd = Path.cwd()
     user_args = list(args or [])
+    t, ctx = _resolve_spec(spec, profile=profile, verbose=verbose, dry_run=dry_run)
 
-    ref = remote_run.parse_spec(spec)
-    if ref is not None:
-        _, t = remote_run.resolve(spec)
-        ctx = remote_run.adhoc_context(t, ref, profile=profile, verbose=verbose, dry_run=dry_run)
-        if isinstance(t, Script):
-            for dep in graph.topo_order([t]):
-                if isinstance(dep, Artifact):
-                    _run_commands(dep.build_cmds(ctx), ctx)
-            _run_commands(t.run_cmds(ctx), ctx)
-            return
-        if isinstance(t, Artifact):
-            _exec_artifact(t, ctx, user_args, user_cwd)
-            return
-        typer.echo(f"error: don't know how to run {type(t).__name__}", err=True)
-        raise typer.Exit(1)
-
-    ctx = _prepare(profile=profile, verbose=verbose, dry_run=dry_run)
-    t = _resolve(spec)
     if isinstance(t, Script):
-        # Build any Artifact deps first
+        # Build any Artifact deps first.
         for dep in graph.topo_order([t]):
             if isinstance(dep, Artifact):
                 _run_commands(dep.build_cmds(ctx), ctx)
