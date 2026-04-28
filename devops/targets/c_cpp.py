@@ -267,27 +267,21 @@ class CCompile:
         return cmds, objs
 
     def _remote_dep_build_cmds(self, ctx: "BuildContext") -> list[Command]:
-        """Build commands for any remote Target that `libs=` or `includes=`
-        refs point at. Resolution is lazy (network-backed), so those
-        Targets aren't in ``self.deps`` and topo-sort can't see them —
-        we inline their build_cmds before our own link step so they
-        actually exist on disk."""
-        from devops.core.target import Artifact
-        from devops.remote import resolve_remote_ref
+        """Inline build commands for any remote Target referenced by
+        ``libs=`` or ``includes=``. Refs aren't in ``self.deps``
+        (resolution is lazy and network-backed), so we have to schedule
+        them ourselves. Routes through the shared
+        ``inline_ref_build_cmds`` so the per-run dedup spans every
+        artifact in the build, not just this one."""
+        from devops.targets._specs import inline_ref_build_cmds
 
-        cmds: list[Command] = []
-        seen: set[str] = set()
-        for entries in (self.libs, self.includes):
-            for entry in entries:
-                if not isinstance(entry, Ref):
-                    continue
-                target = resolve_remote_ref(entry)
-                if target.qualified_name in seen:
-                    continue
-                seen.add(target.qualified_name)
-                if isinstance(target, Artifact):
-                    cmds.extend(target.build_cmds(ctx))
-        return cmds
+        refs = [
+            entry
+            for entries in (self.libs, self.includes)
+            for entry in entries
+            if isinstance(entry, Ref)
+        ]
+        return inline_ref_build_cmds(refs, ctx)
 
     def _link_flags_for_libs(self, ctx: "BuildContext") -> tuple[list[str], list[Path]]:
         """Return (linker args, extra input paths).

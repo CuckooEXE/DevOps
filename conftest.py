@@ -27,13 +27,16 @@ if _PLUGINS_ROOT.is_dir():
 
 from devops import registry  # noqa: E402
 from devops.core.target import Project  # noqa: E402
+from devops.targets import _specs as _target_specs  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _fresh_registry():
     registry.reset()
+    _target_specs.reset_ref_prelude_dedup()
     yield
     registry.reset()
+    _target_specs.reset_ref_prelude_dedup()
 
 
 @pytest.fixture

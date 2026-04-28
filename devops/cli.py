@@ -114,6 +114,10 @@ def _complete_installable(incomplete: str) -> list[str]:
 
 
 def _prepare(profile: OptimizationLevel = OptimizationLevel.Debug, verbose: bool = False, dry_run: bool = False) -> BuildContext:
+    from devops.targets._specs import reset_ref_prelude_dedup
+
+    # Each CLI invocation is its own "run" for dedup purposes.
+    reset_ref_prelude_dedup()
     root = find_workspace_root(Path.cwd())
     discover_projects(root)
     toolchains = load_toolchains(root)

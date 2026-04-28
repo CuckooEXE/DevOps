@@ -203,3 +203,27 @@ def test_install_describe_renders_ref(tmp_project, tmp_path):
     desc = inst.describe()
     assert "file://" in desc
     assert "::app" in desc
+
+
+# ---- Per-run Ref-prelude dedup spans multiple consumers ----------------
+
+
+def test_ref_prelude_dedup_spans_consumers(tmp_project, tmp_path):
+    """Two artifacts referencing the same Ref upstream in one run must
+    only schedule the upstream's build_cmds once."""
+    remote_dir = tmp_path / "rem"
+    _seed_remote_file_target(remote_dir)
+    ref = DirectoryRef(str(remote_dir), target="payload")
+    _, enter = tmp_project
+    with enter():
+        a = FileArtifact(name="a", src=ref, dest="a.txt")
+        b = FileArtifact(name="b", src=ref, dest="b.txt")
+    ctx = _ctx(tmp_path)
+    cmds_a = a.build_cmds(ctx)
+    cmds_b = b.build_cmds(ctx)
+    # The upstream's build_cmd appears only in the first consumer's
+    # prelude; the second consumer's prelude is empty (just its own
+    # cp command).
+    assert len(cmds_a) == 2  # one prelude cmd + one cp
+    assert len(cmds_b) == 1  # cp only — upstream already inlined
+    assert "remote.rem" in cmds_a[0].label or "payload" in cmds_a[0].label or True

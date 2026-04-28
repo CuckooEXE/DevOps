@@ -60,24 +60,40 @@ def resolve_target_spec(
     )
 
 
+# Process-global set of upstream targets already inlined this CLI run.
+# Every artifact that consumes a Ref source goes through
+# ``inline_ref_build_cmds``; this set ensures the same upstream's
+# build_cmds aren't scheduled twice when multiple consumers reference
+# the same Ref in a single ``devops`` invocation. Tests must call
+# ``reset_ref_prelude_dedup`` between independent runs.
+_INLINED_THIS_RUN: set[str] = set()
+
+
+def reset_ref_prelude_dedup() -> None:
+    """Clear the per-run dedup set. Called at the start of each CLI
+    invocation and (via an autouse fixture) between tests."""
+    _INLINED_THIS_RUN.clear()
+
+
 def inline_ref_build_cmds(
     refs: Iterable[Ref], ctx: "BuildContext"
 ) -> list["Command"]:
     """Resolve each Ref and inline its upstream build_cmds, deduplicated.
 
-    Returns the prefix of commands that the calling artifact should emit
-    before its own commands so the resolved upstream output exists on
-    disk by the time the artifact tries to consume it.
+    Dedup spans the whole CLI run via ``_INLINED_THIS_RUN`` so a single
+    upstream referenced by multiple consumers in the same run is built
+    once. Returns the prefix of commands that the calling artifact
+    should emit before its own so the resolved upstream output exists
+    on disk by the time the consumer reads it.
     """
     from devops.core.target import Artifact
 
     cmds: list[Command] = []
-    seen: set[str] = set()
     for ref in refs:
         target = resolve_remote_ref(ref)
-        if target.qualified_name in seen:
+        if target.qualified_name in _INLINED_THIS_RUN:
             continue
-        seen.add(target.qualified_name)
+        _INLINED_THIS_RUN.add(target.qualified_name)
         if isinstance(target, Artifact):
             cmds.extend(target.build_cmds(ctx))
     return cmds
