@@ -14,6 +14,8 @@ from devops.targets.c_cpp import (
     StaticLibrary,
     glob_sources,
 )
+from devops.targets.archive import CompressedArtifact, CompressionFormat
+from devops.targets.copy import DirectoryArtifact, FileArtifact
 from devops.targets.custom import CustomArtifact
 from devops.targets.docs import SphinxDocs
 from devops.targets.install import Install
@@ -51,6 +53,10 @@ __all__ = [
     "CObjectFile",
     "LdBinary",
     "CustomArtifact",
+    "FileArtifact",
+    "DirectoryArtifact",
+    "CompressedArtifact",
+    "CompressionFormat",
     "PythonWheel",
     "PythonApp",
     "PythonShiv",

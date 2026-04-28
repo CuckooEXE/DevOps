@@ -50,14 +50,14 @@ immediately.
 
 ## Dependency ordering
 
-`Script` deps are treated as build-time dependencies: `devops run
-<script>` topologically builds every `Artifact` dep first, then executes
-the script's cmds. A Script that depends on another Script runs it
+`Script` deps are treated as build-time dependencies: `devops run <name>`
+topologically builds every `Artifact` dep first, then executes the
+script's cmds. A Script that depends on another Script runs it
 beforehand.
 
 ## When to prefer a Script vs a subcommand
 
-- `devops run <script>` is a good fit for **deployment / one-shot**
+- `devops run <name>` is a good fit for **deployment / one-shot**
   operations tied to particular artifacts.
 - If it looks like a test, use `GoogleTest` or `Pytest` so it plugs into
   `devops test`.
