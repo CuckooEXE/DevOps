@@ -47,6 +47,17 @@ def test_install_requires_dest_for_non_wheel(tmp_project, tmp_path):
             Install(name="i", artifact=app)
 
 
+def test_install_rejects_invalid_mode(tmp_project, tmp_path):
+    _seed(tmp_path, "main.c", "int main(){return 0;}")
+    _, enter = tmp_project
+    with enter():
+        app = ElfBinary(name="app", srcs=[tmp_path / "main.c"])
+        with pytest.raises(ValueError, match="mode="):
+            Install(name="bad_letters", artifact=app, dest="/tmp", mode="rwxr-xr-x")
+        with pytest.raises(ValueError, match="mode="):
+            Install(name="bad_digit", artifact=app, dest="/tmp", mode="9999")
+
+
 def test_install_elfbinary_uses_install_dash_D(tmp_project, tmp_path):
     _seed(tmp_path, "main.c", "int main(){return 0;}")
     _, enter = tmp_project

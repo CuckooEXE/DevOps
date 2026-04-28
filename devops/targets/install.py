@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from devops.core.command import Command
 from devops.core.target import Artifact, Target
 from devops.remote import Ref
+from devops.targets._paths import validate_octal_mode
 from devops.targets._specs import resolve_target_spec
 
 if TYPE_CHECKING:
@@ -56,6 +57,8 @@ class Install(Target):
         doc: str | None = None,
     ) -> None:
         from devops.targets.python import PythonWheel
+
+        validate_octal_mode(mode, "mode", f"Install({name!r})")
 
         if isinstance(artifact, Artifact):
             if not isinstance(artifact, PythonWheel) and dest is None:
